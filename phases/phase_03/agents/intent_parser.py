@@ -106,7 +106,41 @@ def _call_gemini_sync(message: str, context: list[dict]) -> UserIntent:
     genai.configure(api_key=settings.gemini_api_key)
     model = genai.GenerativeModel("gemini-2.0-flash-lite")
 
-    schema = UserIntent.model_json_schema()
+    raw_schema = UserIntent.model_json_schema()
+    
+    def strip_unsupported(schema_dict: dict) -> dict:
+        """Keep ONLY keys supported by Gemini 2.0 API response_schema."""
+        if not isinstance(schema_dict, dict):
+            return schema_dict
+            
+        cleaned = {}
+        allowed_keys = {"type", "properties", "required", "items", "description", "enum"}
+        
+        # Handle anyOf by taking the first non-null type
+        if "anyOf" in schema_dict:
+            types = schema_dict["anyOf"]
+            for t in types:
+                if t.get("type") != "null":
+                    cleaned.update(strip_unsupported(t))
+                    break
+        
+        for k, v in schema_dict.items():
+            if k not in allowed_keys:
+                continue
+                
+            if isinstance(v, dict):
+                cleaned[k] = strip_unsupported(v)
+            elif isinstance(v, list):
+                if k == "required":
+                    cleaned[k] = v
+                else:
+                    cleaned[k] = [strip_unsupported(i) if isinstance(i, dict) else i for i in v]
+            else:
+                cleaned[k] = v
+                
+        return cleaned
+
+    schema = strip_unsupported(raw_schema)
 
     # Token budget: current message + last 2 context turns only
     context_trimmed = context[-2:] if context else []

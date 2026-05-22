@@ -171,6 +171,24 @@ class SwiggyReadClient:
             return result.get("orders", [])
         return []
 
+    # ── Phase 9 Write Tools ───────────────────────────────────────────────────
+
+    async def update_food_cart(self, items: list[dict], restaurant_id: str, address_id: str) -> dict:
+        """Add, remove, or update items in the cart."""
+        return await self._call("update_food_cart", {
+            "items": items,
+            "restaurantId": restaurant_id,
+            "addressId": address_id
+        })
+
+    async def flush_food_cart(self) -> dict:
+        """Clear the cart completely."""
+        return await self._call("flush_food_cart", {})
+
+    async def apply_food_coupon(self, coupon_code: str) -> dict:
+        """Apply a coupon to the current cart."""
+        return await self._call("apply_food_coupon", {"couponCode": coupon_code})
+
     # ── Retry core ─────────────────────────────────────────────────────────────
 
     async def _call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
