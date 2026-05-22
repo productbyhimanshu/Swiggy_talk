@@ -104,7 +104,7 @@ def _call_gemini_sync(message: str, context: list[dict]) -> UserIntent:
         raise IntentParseError("GEMINI_API_KEY not set — cannot call Agent 1")
 
     genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash-lite")
+    model = genai.GenerativeModel("gemini-2.0-flash")
 
     raw_schema = UserIntent.model_json_schema()
     
@@ -127,8 +127,15 @@ def _call_gemini_sync(message: str, context: list[dict]) -> UserIntent:
         for k, v in schema_dict.items():
             if k not in allowed_keys:
                 continue
-                
-            if isinstance(v, dict):
+
+            if k == "properties" and isinstance(v, dict):
+                # v is {field_name: field_schema} — keys are field names, not schema keys
+                # Must iterate them separately rather than recursing into the whole dict
+                cleaned[k] = {
+                    field: strip_unsupported(field_schema)
+                    for field, field_schema in v.items()
+                }
+            elif isinstance(v, dict):
                 cleaned[k] = strip_unsupported(v)
             elif isinstance(v, list):
                 if k == "required":

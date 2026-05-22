@@ -34,7 +34,7 @@ async def stream_response(request: ChatRequest, client_request: Request):
     settings = get_settings()
     
     genai.configure(api_key=settings.gemini_api_key)
-    gemini_client = genai.GenerativeModel("gemini-2.0-flash-lite")
+    gemini_client = genai.GenerativeModel("gemini-2.0-flash")
     swiggy_client = SwiggyReadClient()
 
     # 1. Check staleness (Architecture §8)
