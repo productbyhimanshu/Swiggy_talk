@@ -19,64 +19,69 @@ from phases.phase_06.utils.templates import (
 
 
 async def route_message(
-    route: Route, 
-    intent: UserIntent, 
-    state: ConversationState, 
-    swiggy_client: SwiggyReadClient, 
+    route: Route,
+    intent: UserIntent,
+    state: ConversationState,
+    swiggy_client: SwiggyReadClient,
     gemini_client
 ) -> list[dict[str, Any]]:
     """
     Main entrypoint that routes the classified message (Architecture §6).
     Returns the JSON bubble array for the UI.
     """
-    
+
     # 1. TEMPLATE SHORT-CIRCUITS (Zero LLM calls)
     if route == Route.CART_ACTION:
         # Do cart logic...
         return get_cart_template({"cart_total": 450})
-        
+
     elif route == Route.CANCEL:
-        # Clear state...
-        state.clear()
+        # Reset mutable search state (ConversationState is a Pydantic model — no .clear())
+        state.cached_results = []
+        state.has_recommendations = False
+        state.current_restaurant_id = None
+        state.awaiting_clarification = False
         return get_cancel_template()
-        
-        
+
+
     # 2. FULL SEARCH PIPELINE
-    elif route == Route.NEW_SEARCH:
+    # AMBIGUOUS also goes through the search pipeline — intent is already parsed
+    # by the time we get here (router.py runs parse_intent for AMBIGUOUS too)
+    elif route in (Route.NEW_SEARCH, Route.AMBIGUOUS):
         search_task = asyncio.create_task(
             swiggy_client.search_restaurants(
                 query=intent.search_query or "food",
                 address_id=state.address_id
             )
         )
-        
+
         weights = get_weights(intent)
-        
+
         try:
             raw_restaurants = await search_task
         except Exception:
             return get_swiggy_down_template()
-            
+
         top_6 = await final_rank(raw_restaurants, intent, gemini_client)
-        
-        # Save to state
+
+        # Save to state (field is cached_results per ConversationState model)
         state.has_recommendations = True
-        state.cached_restaurants = raw_restaurants
-        
+        state.cached_results = raw_restaurants
+
         # Format into Persona bubbles
-        return await format_recommendations(intent, top_6, state.history, gemini_client)
-        
-        
+        return await format_recommendations(intent, top_6, state.message_history, gemini_client)
+
+
     # 3. REFINE PIPELINE (No network call)
     elif route == Route.REFINE:
-        if not state.has_recommendations or not hasattr(state, "cached_restaurants") or not state.cached_restaurants:
+        if not state.has_recommendations or not state.cached_results:
             return await route_message(Route.NEW_SEARCH, intent, state, swiggy_client, gemini_client)
-            
-        raw_restaurants = state.cached_restaurants
-        top_6 = await final_rank(raw_restaurants, intent, gemini_client)
-        
-        return await format_recommendations(intent, top_6, state.history, gemini_client)
 
-    
+        raw_restaurants = state.cached_results
+        top_6 = await final_rank(raw_restaurants, intent, gemini_client)
+
+        return await format_recommendations(intent, top_6, state.message_history, gemini_client)
+
+
     # Fallback for unhandled routes in this phase
     return [{"text": "I'm still learning how to handle that! 😅", "quick_replies": []}]

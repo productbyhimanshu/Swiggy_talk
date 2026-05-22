@@ -104,7 +104,7 @@ def _call_gemini_sync(message: str, context: list[dict]) -> UserIntent:
         raise IntentParseError("GEMINI_API_KEY not set — cannot call Agent 1")
 
     genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
     raw_schema = UserIntent.model_json_schema()
     
