@@ -11,6 +11,11 @@ phases/
   phase_00/     # Done — OAuth, Swiggy API, logging, order guard
   phase_01/     # Done — session state, /api/session, address resolve
   phase_02/     # Done — orchestrator routing, POST /api/classify
+  phase_03/     # Done — Agent 1 (Intent parser)
+  phase_04/     # Done — Read tools & Filter gates
+  phase_05/     # Done — Agent 3 (Scorer + Gemini Rerank)
+  phase_06/     # Done — Agent 4 (Persona Formatter) & Templates
+  phase_07/     # Done — SSE Streaming + /api/chat
   ...
   phase_13/     # Real orders (last)
   assembler.py  # Wires completed phases into one FastAPI app
