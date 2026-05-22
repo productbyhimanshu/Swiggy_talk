@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     swiggy_oauth_client_secret: str = Field(
         default="", alias="SWIGGY_OAUTH_CLIENT_SECRET"
     )
+    swiggy_access_token: str = Field(default="", alias="SWIGGY_ACCESS_TOKEN")
+    swiggy_token_expiry: float = Field(default=0.0, alias="SWIGGY_TOKEN_EXPIRY")
     swiggy_oauth_redirect_uri: str = Field(
         default="http://localhost:8000/auth/callback",
         alias="SWIGGY_OAUTH_REDIRECT_URI",

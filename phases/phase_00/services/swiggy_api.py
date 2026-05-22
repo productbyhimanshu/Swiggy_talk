@@ -60,7 +60,8 @@ class SwiggyApiClient:
         token = self.auth.get_access_token()
         if not token:
             raise SwiggyAuthError(
-                "Not authenticated. Complete OAuth via GET /auth/swiggy/login"
+                "Not authenticated or token expired. "
+                "Run `python phases/phase_00/services/swiggy_auth.py` to authenticate."
             )
         return token
 
@@ -96,6 +97,8 @@ class SwiggyApiClient:
 
     async def _invoke_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         token = self._require_token()
+        print(f"RAW TOKEN: {repr(token)}")
+        
         payload = {
             "jsonrpc": "2.0",
             "method": "tools/call",
@@ -103,11 +106,15 @@ class SwiggyApiClient:
             "id": self._next_id(),
         }
 
+        # Ensure no extra spaces or formatting in the Bearer string
+        token_clean = token.strip()
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {token_clean}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json, text/event-stream",
         }
+        
+        print(f"HEADERS: {headers}")
 
         url = self.settings.swiggy_food_url.rstrip("/")
         log.info("swiggy_tool_call", tool=name, write=name in WRITE_TOOLS)

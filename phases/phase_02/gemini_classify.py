@@ -64,7 +64,7 @@ def _call_gemini_sync(message: str, state: ConversationState) -> Route:
 
     settings = get_settings()
     genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash-lite")
 
     context = state.get_context_window()[-2:]
     prompt = (

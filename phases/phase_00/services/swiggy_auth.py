@@ -1,4 +1,4 @@
-"""OAuth 2.1 + PKCE for Swiggy Food API (HTTP, not MCP protocol)."""
+"""OAuth 2.1 + PKCE for Swiggy Food API (Clientless flow)."""
 
 from __future__ import annotations
 
@@ -7,60 +7,22 @@ import hashlib
 import json
 import secrets
 import time
-from dataclasses import dataclass
+import urllib.parse
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 
 import httpx
 
-from phases.phase_00.config import Settings, get_settings
+from phases.phase_00.config import Settings, _ENV_FILE, get_settings
 from phases.phase_00.logging_setup import get_logger
 
 log = get_logger(__name__)
 
-TOKEN_STORE_DIR = Path.home() / ".swiggy_talk"
-TOKEN_STORE_FILE = TOKEN_STORE_DIR / "tokens.json"
-PKCE_STORE_FILE = TOKEN_STORE_DIR / "pkce_pending.json"
-
 
 class SwiggyAuthError(Exception):
-    """OAuth or token storage failure."""
-
-
-@dataclass
-class TokenBundle:
-    access_token: str
-    token_type: str
-    expires_in: int
-    scope: str
-    obtained_at: float
-
-    @property
-    def expires_at(self) -> float:
-        return self.obtained_at + self.expires_in
-
-    def is_expired(self, buffer_seconds: int = 60) -> bool:
-        return time.time() >= (self.expires_at - buffer_seconds)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "access_token": self.access_token,
-            "token_type": self.token_type,
-            "expires_in": self.expires_in,
-            "scope": self.scope,
-            "obtained_at": self.obtained_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TokenBundle:
-        return cls(
-            access_token=data["access_token"],
-            token_type=data.get("token_type", "Bearer"),
-            expires_in=int(data["expires_in"]),
-            scope=data.get("scope", ""),
-            obtained_at=float(data.get("obtained_at", time.time())),
-        )
+    """OAuth failure."""
 
 
 def generate_pkce_pair() -> tuple[str, str]:
@@ -71,23 +33,87 @@ def generate_pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
+def update_env_file(**env_vars: str) -> None:
+    """Write arbitrary key-value pairs to .env."""
+    if not _ENV_FILE.exists():
+        _ENV_FILE.write_text("")
+
+    lines = _ENV_FILE.read_text().splitlines()
+    new_lines = []
+    seen = set()
+
+    for line in lines:
+        if "=" in line and not line.strip().startswith("#"):
+            key = line.split("=", 1)[0].strip()
+            if key in env_vars:
+                new_lines.append(f"{key}={env_vars[key]}")
+                seen.add(key)
+                continue
+        new_lines.append(line)
+
+    for key, value in env_vars.items():
+        if key not in seen:
+            new_lines.append(f"{key}={value}")
+
+    _ENV_FILE.write_text("\n".join(new_lines) + "\n")
+    log.info("env_updated", keys=list(env_vars.keys()))
+
+
 class SwiggyAuthService:
-    """OAuth 2.1 + PKCE against https://mcp.swiggy.com."""
+    """OAuth 2.1 + PKCE against Swiggy (Clientless)."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
-        self._base = self.settings.swiggy_oauth_base_url.rstrip("/")
 
-    def build_authorization_url(self, state: str | None = None) -> tuple[str, str]:
+    def get_access_token(self) -> str | None:
+        """Read token from settings, respecting expiration."""
+        token = self.settings.swiggy_access_token
+        expiry = self.settings.swiggy_token_expiry
+
+        if not token:
+            return None
+
+        # Expired or expiring within 5 minutes (300s)
+        if time.time() >= (expiry - 300):
+            log.warning("oauth_token_expired")
+            return None
+
+        return token
+
+    def register_client(self) -> str:
+        """Register a new dynamic client (RFC 7591) and return the client_id."""
+        url = f"{self.settings.swiggy_oauth_base_url.rstrip('/')}/auth/register"
+        payload = {
+            "redirect_uris": [self.settings.swiggy_oauth_redirect_uri],
+            "client_name": "SwiggyTalk Local Agent",
+            "token_endpoint_auth_method": "none"
+        }
+        
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(url, json=payload)
+            
+        if response.status_code >= 400:
+            raise SwiggyAuthError(f"Client registration failed: {response.text}")
+            
+        data = response.json()
+        client_id = data["client_id"]
+        log.info("dynamic_client_registered", client_id=client_id)
+        
+        # Write to .env
+        update_env_file(SWIGGY_OAUTH_CLIENT_ID=client_id)
+        # Update current settings so the rest of the flow uses it
+        self.settings.swiggy_oauth_client_id = client_id
+        
+        return client_id
+
+    def build_authorization_url(
+        self, challenge: str, state: str
+    ) -> str:
         """
-        Build authorize URL and persist PKCE verifier for callback exchange.
-        Returns (authorization_url, state).
+        Build authorize URL pointing to swiggy_oauth_base_url/auth/authorize.
         """
         if not self.settings.swiggy_oauth_client_id:
-            raise SwiggyAuthError("SWIGGY_OAUTH_CLIENT_ID is not configured")
-
-        verifier, challenge = generate_pkce_pair()
-        state = state or secrets.token_urlsafe(16)
+            raise SwiggyAuthError("SWIGGY_OAUTH_CLIENT_ID is required but not set in .env")
 
         params = {
             "response_type": "code",
@@ -98,17 +124,12 @@ class SwiggyAuthService:
             "state": state,
             "scope": "mcp:tools",
         }
-        url = f"{self._base}/auth/authorize?{urlencode(params)}"
-        self._save_pending_pkce(verifier, state)
-        log.info("oauth_authorize_url_built", redirect_uri=self.settings.swiggy_oauth_redirect_uri)
-        return url, state
+        base_url = self.settings.swiggy_oauth_base_url.rstrip("/")
+        url = f"{base_url}/auth/authorize?{urlencode(params)}"
+        return url
 
-    async def exchange_code(self, code: str, state: str | None = None) -> TokenBundle:
-        """Exchange authorization code for access token."""
-        verifier, pending_state = self._load_pending_pkce()
-        if state and pending_state and state != pending_state:
-            raise SwiggyAuthError("OAuth state mismatch — possible CSRF")
-
+    def exchange_code(self, code: str, verifier: str) -> tuple[str, int]:
+        """Exchange authorization code for access token. Returns (token, expires_in)."""
         payload: dict[str, str] = {
             "grant_type": "authorization_code",
             "code": code,
@@ -116,12 +137,12 @@ class SwiggyAuthService:
             "client_id": self.settings.swiggy_oauth_client_id,
             "redirect_uri": self.settings.swiggy_oauth_redirect_uri,
         }
-        if self.settings.swiggy_oauth_client_secret:
-            payload["client_secret"] = self.settings.swiggy_oauth_client_secret
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self._base}/auth/token",
+        # Sync httpx call for the CLI script
+        base_url = self.settings.swiggy_oauth_base_url.rstrip("/")
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                f"{base_url}/auth/token",
                 json=payload,
                 headers={"Content-Type": "application/json"},
             )
@@ -132,61 +153,90 @@ class SwiggyAuthService:
             )
 
         data = response.json()
-        bundle = TokenBundle(
-            access_token=data["access_token"],
-            token_type=data.get("token_type", "Bearer"),
-            expires_in=int(data.get("expires_in", 432000)),
-            scope=data.get("scope", ""),
-            obtained_at=time.time(),
-        )
-        self.save_tokens(bundle)
-        self._clear_pending_pkce()
-        log.info("oauth_token_obtained", expires_in=bundle.expires_in)
-        return bundle
+        access_token = data["access_token"]
+        expires_in = int(data.get("expires_in", 432000))
+        return access_token, expires_in
 
-    def save_tokens(self, bundle: TokenBundle) -> None:
-        TOKEN_STORE_DIR.mkdir(parents=True, exist_ok=True)
-        TOKEN_STORE_FILE.write_text(json.dumps(bundle.to_dict(), indent=2))
-        try:
-            TOKEN_STORE_FILE.chmod(0o600)
-        except OSError:
-            pass
 
-    def load_tokens(self) -> TokenBundle | None:
-        if not TOKEN_STORE_FILE.exists():
-            return None
-        try:
-            data = json.loads(TOKEN_STORE_FILE.read_text())
-            return TokenBundle.from_dict(data)
-        except (json.JSONDecodeError, KeyError) as exc:
-            raise SwiggyAuthError(f"Invalid token store: {exc}") from exc
+# ── CLI Runner ────────────────────────────────────────────────────────────────
 
-    def get_access_token(self) -> str | None:
-        bundle = self.load_tokens()
-        if bundle is None:
-            return None
-        if bundle.is_expired():
-            log.warning("oauth_token_expired")
-            return None
-        return bundle.access_token
+def run_cli_auth() -> None:
+    """Run the local web server to catch the callback and exchange the token."""
+    settings = get_settings()
+    auth_service = SwiggyAuthService(settings)
 
-    def clear_tokens(self) -> None:
-        if TOKEN_STORE_FILE.exists():
-            TOKEN_STORE_FILE.unlink()
-        self._clear_pending_pkce()
+    if not settings.swiggy_oauth_client_id:
+        print("No SWIGGY_OAUTH_CLIENT_ID found. Registering a new dynamic client...")
+        auth_service.register_client()
 
-    def _save_pending_pkce(self, verifier: str, state: str) -> None:
-        TOKEN_STORE_DIR.mkdir(parents=True, exist_ok=True)
-        PKCE_STORE_FILE.write_text(json.dumps({"verifier": verifier, "state": state}))
+    verifier, challenge = generate_pkce_pair()
+    state = secrets.token_urlsafe(16)
 
-    def _load_pending_pkce(self) -> tuple[str, str | None]:
-        if not PKCE_STORE_FILE.exists():
-            raise SwiggyAuthError(
-                "No pending PKCE session. Start login via GET /auth/swiggy/login first."
-            )
-        data = json.loads(PKCE_STORE_FILE.read_text())
-        return data["verifier"], data.get("state")
+    auth_url = auth_service.build_authorization_url(challenge, state)
 
-    def _clear_pending_pkce(self) -> None:
-        if PKCE_STORE_FILE.exists():
-            PKCE_STORE_FILE.unlink()
+    # Parse port from redirect URI (default to 8000 for http if not specified)
+    parsed_uri = urllib.parse.urlparse(settings.swiggy_oauth_redirect_uri)
+    port = parsed_uri.port
+    if port is None:
+        port = 443 if parsed_uri.scheme == "https" else 8000
+
+    callback_code = None
+    callback_state = None
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal callback_code, callback_state
+            query = urllib.parse.urlparse(self.path).query
+            params = parse_qs(query)
+
+            if "code" in params:
+                callback_code = params["code"][0]
+                callback_state = params.get("state", [None])[0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><h1>Authentication Successful!</h1><p>You can close this window and return to the terminal.</p></body></html>"
+                )
+            else:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><h1>Authentication Failed</h1><p>No code found in the callback.</p></body></html>"
+                )
+
+        def log_message(self, format, *args):
+            pass  # Suppress default server logging
+
+    print(f"\n🚀 Exact Swiggy Auth URL to open manually:\n{auth_url}\n")
+    print("Waiting for callback... (Complete Phone + OTP in your browser)")
+    # webbrowser.open(auth_url)  # Disabled per user request
+
+    try:
+        # Bind to '0.0.0.0' to allow localhost properly
+        server = HTTPServer(("0.0.0.0", port), CallbackHandler)
+    except OSError as e:
+        print(f"❌ Failed to start server on port {port}: {e}")
+        return
+    while not callback_code:
+        server.handle_request()
+
+    if callback_state != state:
+        print("❌ Error: State mismatch! Possible CSRF attack.")
+        return
+
+    print("\n✅ Callback received! Exchanging code for token...")
+
+    try:
+        access_token, expires_in = auth_service.exchange_code(callback_code, verifier)
+        expiry = time.time() + expires_in
+        update_env_file(SWIGGY_ACCESS_TOKEN=access_token, SWIGGY_TOKEN_EXPIRY=str(expiry))
+        print("🎉 Success! SWIGGY_ACCESS_TOKEN written to .env")
+        print("You can now run queries!")
+    except Exception as e:
+        print(f"❌ Token exchange failed: {e}")
+
+
+if __name__ == "__main__":
+    run_cli_auth()
