@@ -98,4 +98,15 @@ Each entry follows this structure:
 
 ---
 
+### [2026-05-22 22:20] — BUG FIX: Intent Parser Schema Validation
+**Phase**: 8/9
+**Action**: Investigated and fixed "Unknown field for Schema: title/maximum/anyOf" from Gemini API. Appended missing GEMINI_API_KEY to `.env` file.
+**Result**: Backend API updated to use a draconian schema stripper that keeps only primitive OpenAPI types, solving the strict Pydantic compatibility issue in the `gemini-2.0-flash-lite` SDK.
+**Errors**: `Intent parse failed: Agent 1 failed after 3 attempts`
+**Notes**:
+- The user had `.env` open with the key but it wasn't saved to disk. Fixed by rewriting `.env`.
+- `google.generativeai` throws errors on `anyOf`, `maximum`, `minimum`, `default`, and `title`. Stripped them recursively in `intent_parser.py`.
+
+---
+
 <!-- NEW ENTRIES GO BELOW THIS LINE -->
