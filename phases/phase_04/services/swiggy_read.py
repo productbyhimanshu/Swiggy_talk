@@ -21,6 +21,7 @@ from phases.phase_00.config import Settings, get_settings
 from phases.phase_00.logging_setup import get_logger
 from phases.phase_00.services.swiggy_api import SwiggyApiClient, SwiggyApiError
 from phases.phase_00.services.swiggy_auth import SwiggyAuthService
+from phases.phase_04.utils.parse_swiggy_content import parse_restaurants
 
 log = get_logger(__name__)
 
@@ -86,7 +87,7 @@ class SwiggyReadClient:
         Search restaurants by query + addressId.
 
         architecture §2: addressId is REQUIRED — assert non-null.
-        Returns list of restaurant dicts with availabilityStatus, rating, deliveryTime.
+        Returns list of structured restaurant dicts parsed from MCP text content.
         """
         if not address_id:
             raise ValueError(
@@ -97,8 +98,12 @@ class SwiggyReadClient:
             "search_restaurants",
             {"query": query, "addressId": address_id},
         )
+        # Swiggy returns MCP content blocks: [{"type":"text","text":"Found 10..."}]
+        # Parse into structured restaurant dicts the scorer/UI can consume.
         if isinstance(result, list):
-            return result
+            if result and isinstance(result[0], dict) and result[0].get("type") == "text":
+                return parse_restaurants(result)
+            return result  # already structured (future-proof)
         if isinstance(result, dict):
             return result.get("restaurants", [])
         return []

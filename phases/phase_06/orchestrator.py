@@ -68,9 +68,10 @@ async def route_message(
 
         top_6 = await final_rank(raw_restaurants, intent, gemini_client)
 
-        # Save to state (field is cached_results per ConversationState model)
+        # Save top_6 (scored + ranked) so the cards event and REFINE path
+        # both see the same structured list the UI was shown.
         state.has_recommendations = True
-        state.cached_results = raw_restaurants
+        state.cached_results = top_6
 
         # Format into Persona bubbles
         return await format_recommendations(intent, top_6, state.message_history, gemini_client)

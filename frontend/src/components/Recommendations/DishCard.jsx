@@ -3,7 +3,11 @@ import { Star, Clock, Plus } from "../../icons/index.jsx";
 export default function DishCard({ dish, qty, lockedRestaurant, onAdd, onInc, onDec }) {
   const switches = lockedRestaurant && dish.restaurant !== lockedRestaurant;
   const sameRest  = lockedRestaurant && dish.restaurant === lockedRestaurant;
-  const eta = dish.eta ?? dish.deliveryTime ?? "—";
+  // eta may be int (minutes) or string like "25 min" — normalise to just the number
+  const etaRaw = dish.eta ?? dish.deliveryTime ?? "—";
+  const eta = typeof etaRaw === "number" ? etaRaw : String(etaRaw).replace(/\s*min.*/, "").trim();
+  // subtitle: cuisines for restaurant cards, or restaurant name for dish cards
+  const subtitle = dish.cuisines || dish.restaurant || "";
 
   return (
     <div className={"dish-card" + (switches ? " switches" : "")}>
@@ -12,25 +16,28 @@ export default function DishCard({ dish, qty, lockedRestaurant, onAdd, onInc, on
         <div className="placeholder">{dish.placeholder || dish.name}</div>
         {dish.why && <div className="why">{dish.why}</div>}
         <div className="rating-pill">
-          <Star /> {dish.rating}
+          <Star /> {dish.rating ?? "—"}
         </div>
         {sameRest && qty === 0 && <div className="card-flag in-basket">in your basket</div>}
         {switches && <div className="card-flag switches-cart">switches basket</div>}
       </div>
       <div className="body">
         <div className="name-row">
-          <span className={"veg-dot" + (dish.veg ? "" : " nonveg")} />
+          {/* Only show veg dot when veg status is known */}
+          {dish.veg !== null && dish.veg !== undefined && (
+            <span className={"veg-dot" + (dish.veg ? "" : " nonveg")} />
+          )}
           <span>{dish.name}</span>
         </div>
         <div className="rest">
-          <span>{dish.restaurant}</span>
-          <span>·</span>
-          <span className="eta"><Clock /> {eta} min</span>
+          <span className="cuisines">{subtitle}</span>
+          {eta !== "—" && <><span>·</span><span className="eta"><Clock /> {eta} min</span></>}
         </div>
         <div className="footer-row">
           <div className="price">
             {dish.mrp && <span className="strike">₹{dish.mrp}</span>}
             ₹{dish.price}
+            {dish.priceLabel && <span className="price-label"> {dish.priceLabel}</span>}
           </div>
           {qty > 0 ? (
             <div className="qty">

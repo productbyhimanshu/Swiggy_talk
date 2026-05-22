@@ -33,15 +33,17 @@ HARD RULES:
 
 def _prepare_context(intent: UserIntent, top_6: list[dict], history: list[dict]) -> str:
     """Compact the data to save tokens (Architecture §6)."""
-    # Keep only what the LLM needs to see to format the message.
+    # Restaurants come from parse_restaurants() — field names are guaranteed.
+    # Keep only what the LLM needs; drop scorer internals (_base_score etc.)
     compact_dishes = []
     for d in top_6:
         compact_dishes.append({
-            "name": d.get("name"),
-            "restaurant": d.get("restaurant", "Unknown"),
-            "price": d.get("price", d.get("costForTwo")),
-            "eta": d.get("deliveryTime", "45 mins"),
-            "rating": d.get("rating", "New")
+            "name":       d.get("name", "Unknown"),
+            "cuisines":   d.get("cuisines", ""),
+            "rating":     d.get("rating", "—"),
+            "eta":        d.get("eta") or d.get("deliveryTime", "—"),
+            "costForTwo": d.get("costForTwo") or d.get("price", "—"),
+            "id":         d.get("restaurantId") or d.get("id", ""),
         })
 
     # Limit history to last 6 messages
@@ -94,24 +96,24 @@ async def format_recommendations(intent: UserIntent, top_6: list[dict], history:
 
 def _deterministic_fallback(top_6: list[dict]) -> list[dict[str, Any]]:
     """
-    Fallback if Gemini fails/hallucinates. 
-    Returns data correctly formatted as bubbles without LLM.
+    Fallback if Gemini fails/hallucinates.
+    Renders restaurant cards from parsed Swiggy data without an LLM call.
     """
     bubbles = [{"text": "Here are some top picks I found:", "quick_replies": []}]
-    
-    for d in top_6[:3]: # Show top 3 in fallback to avoid huge lists
-        name = d.get("name", "Item")
-        restaurant = d.get("restaurant", "Restaurant")
-        price = d.get("price", d.get("costForTwo", "N/A"))
-        eta = d.get("deliveryTime", "45 mins")
-        rating = d.get("rating", "New")
-        
-        bubble_text = f"• **{name}** from {restaurant} (★{rating}) — ₹{price} ({eta})"
-        bubbles.append({"text": bubble_text, "quick_replies": ["Add to cart"]})
-        
+
+    for d in top_6[:6]:
+        name      = d.get("name", "Restaurant")
+        cuisines  = d.get("cuisines", "")
+        rating    = d.get("rating", "—")
+        eta       = d.get("eta") or d.get("deliveryTime", "—")
+        cost      = d.get("costForTwo") or d.get("price", "—")
+
+        line = f"• **{name}** ({cuisines}) — ★{rating} · {eta} min · ₹{cost} for two"
+        bubbles.append({"text": line, "quick_replies": []})
+
     bubbles.append({
-        "text": "Need anything else to narrow down?", 
-        "quick_replies": ["Show more", "Change budget"]
+        "text": "Need anything else to narrow down?",
+        "quick_replies": ["Show more", "Change budget", "Faster delivery"],
     })
-    
+
     return bubbles
