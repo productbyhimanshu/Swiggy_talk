@@ -1,0 +1,44 @@
+# Environment & secrets
+.env
+.env.local
+*.token
+backend/data/
+.tokens/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# Application logs (JSON lines — inspect locally, never commit)
+logs/*.log
+logs/*.log.*
+!logs/.gitkeep
+!logs/README.md
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Swiggy OAuth session (local only)
+.swiggy_talk/
