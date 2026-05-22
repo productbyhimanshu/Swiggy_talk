@@ -16,6 +16,7 @@ phases/
   phase_05/     # Done — Agent 3 (Scorer + Gemini Rerank)
   phase_06/     # Done — Agent 4 (Persona Formatter) & Templates
   phase_07/     # Done — SSE Streaming + /api/chat
+  phase_08/     # Done — Bhook chat UI (React frontend)
   ...
   phase_13/     # Real orders (last)
   assembler.py  # Wires completed phases into one FastAPI app
@@ -87,6 +88,28 @@ curl -X POST http://localhost:8000/api/classify \
 - `logs/errors.log` — warnings & errors only
 
 See [doc/logging.md](doc/logging.md) and [logs/README.md](logs/README.md).
+
+## Phase 8 — Frontend (Bhook chat UI)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173)
+
+> Requires the backend running on port 8000 for live SSE chat.
+
+**What's in the UI:**
+- Mobile (iOS-framed) and desktop (3-pane) layouts — toggle via the tweaks bar
+- Streaming chat bubbles, typing indicator, quick-reply chips (disappear on tap, stale on older messages)
+- Dish cards (6 results) with veg/non-veg dot, why-matched tag, rating, ETA, price — carousel / stack / grid
+- Seed chips on empty state, composer suggestion seeds
+- Cart bar (sticky), basket sheet (mobile), desktop cart sidebar
+- Restaurant-switch confirmation (single-restaurant Swiggy constraint)
+- System bubbles for stale session (30 min) and Swiggy-down errors
+- Tweaks: Device · Card layout · Bubble shape · Density
 
 ## Design docs
 
