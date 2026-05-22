@@ -36,6 +36,16 @@ def get_stale_template() -> list[dict[str, Any]]:
     ]
 
 
+def get_greeting_template() -> list[dict[str, Any]]:
+    """Return a static bubble array for greetings / small talk."""
+    return [
+        {
+            "text": "Hey! 👋 I'm Bhook — your food buddy. What are you craving today?",
+            "quick_replies": ["🍕 Pizza", "🍱 Biryani", "🍔 Burgers", "Surprise me!"]
+        }
+    ]
+
+
 def get_swiggy_down_template() -> list[dict[str, Any]]:
     """Return a static bubble array for Swiggy API errors."""
     return [

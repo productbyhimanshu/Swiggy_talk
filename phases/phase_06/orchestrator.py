@@ -14,6 +14,7 @@ from phases.phase_06.agents.persona import format_recommendations
 from phases.phase_06.utils.templates import (
     get_cart_template,
     get_cancel_template,
+    get_greeting_template,
     get_swiggy_down_template
 )
 
@@ -31,7 +32,10 @@ async def route_message(
     """
 
     # 1. TEMPLATE SHORT-CIRCUITS (Zero LLM calls)
-    if route == Route.CART_ACTION:
+    if route == Route.GREETING:
+        return get_greeting_template()
+
+    elif route == Route.CART_ACTION:
         # Do cart logic...
         return get_cart_template({"cart_total": 450})
 
