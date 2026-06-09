@@ -1,10 +1,29 @@
 import { Pin } from "../../icons/index.jsx";
 
-export default function AddressPill() {
+/**
+ * AddressPill — shows the current delivery address and lets the user change it.
+ *
+ * Props:
+ *   address  — { label, chip } from useChat().deliveryAddress, or null
+ *   onClick  — called when the user taps the pill to change address
+ */
+export default function AddressPill({ address, onClick }) {
+  const label = address?.chip || address?.label || null;
+
   return (
-    <div className="address-pill">
+    <button
+      className={"address-pill" + (onClick ? " clickable" : "")}
+      onClick={onClick}
+      title={address?.address || "Tap to set delivery address"}
+      aria-label="Change delivery address"
+    >
       <span className="pin"><Pin /></span>
-      Deliver to <b>Home · Indiranagar</b>
-    </div>
+      {label ? (
+        <>Deliver to <b>{label}</b></>
+      ) : (
+        <span className="address-pill-placeholder">Set delivery address</span>
+      )}
+      {onClick && <span className="address-pill-caret">›</span>}
+    </button>
   );
 }

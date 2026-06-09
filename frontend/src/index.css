@@ -154,9 +154,30 @@ button { font-family: inherit; cursor: pointer; border: none; }
   color: var(--ink-2);
   width: fit-content;
   box-shadow: var(--shadow-sm);
+  cursor: default;
+  font-family: inherit;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
+.address-pill.clickable { cursor: pointer; }
+.address-pill.clickable:hover {
+  border-color: var(--curry);
+  background: var(--curry-soft);
+  color: var(--curry-deep);
+}
+.address-pill.clickable:hover b { color: var(--curry-deep); }
+.address-pill.clickable:active { transform: scale(0.98); }
 .address-pill .pin { color: var(--curry); display: flex; }
 .address-pill b { color: var(--ink); font-weight: 700; }
+.address-pill-placeholder { color: var(--mute); font-style: italic; }
+.address-pill-caret {
+  color: var(--mute);
+  font-size: 14px;
+  line-height: 1;
+  margin-left: 2px;
+  transition: color 0.15s ease;
+}
+.address-pill.clickable:hover .address-pill-caret { color: var(--curry); }
 
 /* ── Stream / message list ───────────────────────────────────── */
 .stream {

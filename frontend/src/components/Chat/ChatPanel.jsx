@@ -57,7 +57,10 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
       data-density={density !== "default" ? density : undefined}
     >
       <AppBar cartCount={cartState.cartCount} onCart={() => setBasketOpen(true)} />
-      <AddressPill />
+      <AddressPill
+        address={chat.deliveryAddress}
+        onClick={() => chat.sendMessage("change address")}
+      />
 
       <div className="stream" ref={streamRef}>
         {isEmpty && (

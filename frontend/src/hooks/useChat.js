@@ -13,6 +13,7 @@ const uid = () => `m${++_uid}`;
 export function useChat() {
   const [messages, setMessages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [deliveryAddress, setDeliveryAddress] = useState(null); // { label, chip, addressId }
   const sessionId = useRef(uid());
 
   const push = useCallback((msg) =>
@@ -48,10 +49,18 @@ export function useChat() {
             push({
               type: "ai",
               text: event.text,
-              quickReplies: event.quick_replies || null,
+              quickReplies: event.quick_replies?.length ? event.quick_replies : null,
             });
           } else if (event.type === "cards") {
             push({ type: "cards", dishes: event.dishes || [], refine: true });
+          } else if (event.type === "address_confirmed") {
+            // Backend confirmed which address was selected — update the pill
+            setDeliveryAddress({
+              label:     event.label     || "",
+              chip:      event.chip      || event.label || "",
+              addressId: event.addressId || "",
+              address:   event.address   || "",
+            });
           }
           // cart_update handled in Phase 9
         }
@@ -77,8 +86,9 @@ export function useChat() {
   const reset = useCallback(() => {
     setMessages([]);
     setIsTyping(false);
+    setDeliveryAddress(null);
     sessionId.current = uid();
   }, []);
 
-  return { messages, isTyping, sendMessage, markQRConsumed, reset };
+  return { messages, isTyping, deliveryAddress, sendMessage, markQRConsumed, reset };
 }
