@@ -110,3 +110,51 @@ Each entry follows this structure:
 ---
 
 <!-- NEW ENTRIES GO BELOW THIS LINE -->
+
+### [2026-06-09 20:08] — PHASE COMPLETE: Phase 9 — Cart API
+**Phase**: 9
+**Action**: Audited Phase 9 implementation; cleaned dead stub in `routes/cart.py`; marked `__init__.py` STATUS as `"complete"`; ran full test suite.
+**Result**: 5/5 tests passed (`test_cart.py`) — 9.E1–9.E5 all green in 0.01s.
+**Errors**: None
+**Notes**:
+- Real cart logic lives in `phase_09/router.py` (what assembler + tests use).
+- `phase_09/routes/cart.py` was a dead stub — replaced with redirect comment.
+- All Swiggy write tools (`update_food_cart`, `flush_food_cart`, `apply_food_coupon`) confirmed implemented in `phase_04/services/swiggy_read.py`.
+- Budget guard (₹1000), single-restaurant flush, and optimistic rollback all verified.
+- ⚠️ FutureWarning: `google.generativeai` deprecated — upgrade to `google.genai` needed (tracked for later).
+
+---
+
+### [2026-06-09 20:15] — PHASE COMPLETE: Phase 10 — Retries + Fallback Chain
+**Phase**: 10
+**Action**: Implemented `phase_10/utils/retries.py` and `phase_10/utils/fallbacks.py`; wrote test suites `test_retries.py` and `test_fallbacks.py`; fixed stdlib logging incompatibility (structlog-style kwargs → format strings).
+**Result**: 16/16 tests passed in 0.01s.
+**Errors**: Initial TypeError on `log.warning(key=val)` — stdlib logging doesn't accept extra keyword args. Fixed by switching to `"msg key=%s" % val` format strings.
+**Notes**:
+- `retries.py`: Standalone `retry_call()` coroutine — 3× exponential backoff, 4xx non-retryable, raises `RetryExhaustedError` after exhaustion.
+- `fallbacks.py`: Full fallback chain per architecture §14 — covers swiggy_down, Gemini classify fail, Agent 1/3 failures, restaurant closed, COD coupon filter.
+- `apply_fallback_chain(error, context)` is the orchestrator-level dispatcher keyed by `context["stage"]`.
+- README updated: phases 9 and 10 marked Done.
+- Next: **Phase 11 — APScheduler timing engine** (`scheduler.py` currently `raise NotImplementedError`).
+
+---
+
+### [2026-06-09 21:00] — PHASE COMPLETE: Phase 11 — Timing Scheduler
+**Phase**: 11
+**Action**: Implemented `services/scheduler.py` (timing engine + job store), `routes/schedule.py` (POST/DELETE /api/schedule), `tests/test_timing.py` (25 test cases).
+**Result**: 25/25 tests passed in 0.02s. First-run green.
+**Errors**: None
+**Notes**:
+- `calculate_order_time()`: `fire_at = delivery_target − eta_minutes − 5min_buffer`. Uses `parse_eta()` max-value parser from Phase 4.
+- `order_now=True` when `fire_at` is ≤2 min away or already past.
+- `warn_far_ahead=True` when delivery target is >4h from now.
+- `pre_order_check()`: validates restaurant OPEN + cart non-empty + ETA hasn't spiked beyond window.
+- `execute_scheduled_order()`: raises `OrderDisabledError` via `assert_orders_enabled()` — stub confirmed.
+- `cancel_job()`: idempotent, marks `job.cancelled=True`, no auto-flush (caller decides UX).
+- In-memory `_jobs` registry — no DB dependency in Phase 11.
+- Schedule router wired into `assembler.py` (`POST /api/schedule`, `DELETE /api/schedule/{job_id}`).
+- Phase 11 exit criteria: timing 100%, stub confirmed never places real order. ✅
+- Next: **Phase 12 — Full eval suite gate**.
+
+
+

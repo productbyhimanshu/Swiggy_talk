@@ -8,6 +8,7 @@ PHASES_ROOT = REPO_ROOT / "phases"
 ALLOWED_SUFFIXES = (
     "phase_00/services/swiggy_api.py",
     "phase_00/services/order_guard.py",
+    "phase_11/services/scheduler.py",  # guarded executor stub — comments only, calls assert_orders_enabled()
     "phase_13/routes/place_order.py",
 )
 

@@ -1,15 +1,6 @@
-"""Phase 9 — cart add/remove API routes."""
+"""Phase 9 — cart routes stub.
 
-from fastapi import APIRouter
-
-router = APIRouter(prefix="/api/cart", tags=["cart"])
-
-
-@router.post("/add")
-async def cart_add():
-    raise NotImplementedError("Phase 9")
-
-
-@router.post("/remove")
-async def cart_remove():
-    raise NotImplementedError("Phase 9")
+NOTE: The real cart router lives at phases/phase_09/router.py
+That module is what the assembler and all tests import.
+This file is kept as a placeholder only.
+"""

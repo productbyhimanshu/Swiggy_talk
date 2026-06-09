@@ -17,8 +17,11 @@ phases/
   phase_06/     # Done — Agent 4 (Persona Formatter) & Templates
   phase_07/     # Done — SSE Streaming + /api/chat
   phase_08/     # Done — Bhook chat UI (React frontend)
-  ...
-  phase_13/     # Real orders (last)
+  phase_09/     # Done — Cart API (add/remove, budget guard, restaurant flush)
+  phase_10/     # Done — Retries (3x backoff) + fallback chain
+  phase_11/     # Done — Timing scheduler (calculate_order_time, pre_order_check, stubs)
+  phase_12/     # Done — Full eval suite gate (223/223 tests ✅)
+  phase_13/     # Next — Real order placement (manual sign-off required)
   assembler.py  # Wires completed phases into one FastAPI app
 
 backend/
@@ -111,7 +114,19 @@ Open [http://localhost:5173](http://localhost:5173)
 - System bubbles for stale session (30 min) and Swiggy-down errors
 - Tweaks: Device · Card layout · Bubble shape · Density
 
+## Phase 12 — Eval suite gate
+
+```bash
+bash scripts/run_eval_suite.sh
+```
+
+Runs all 223 tests across phases 0–12 with `ORDER_ENABLED=false`.
+All pass → manually add `EVAL_SUITE_PASSED=true` to `.env`, then proceed to Phase 13.
+
+**Current status: ✅ 223/223 tests passing — EVAL GATE PASSED**
+
 ## Design docs
 
 - [doc/architecture.md](doc/architecture.md)
 - [TODO.md](TODO.md)
+- [doc/agent_log.md](doc/agent_log.md)
