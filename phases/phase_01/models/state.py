@@ -20,7 +20,11 @@ class ConversationState(BaseModel):
     scheduled_order: dict | None = None
     message_history: list[dict] = Field(default_factory=list)
     last_activity: datetime = Field(default_factory=datetime.now)
-    address_id: str | None = None
+    # ── Address resolution (architecture: 100% from get_addresses, never GPS) ──
+    address_id: str | None = None          # selected Swiggy addressId
+    addresses: list[dict] = Field(default_factory=list)  # cached from get_addresses
+    awaiting_address_pick: bool = False    # True while address picker chips are shown
+    pending_search_query: str | None = None  # original query stored while waiting for address pick
 
     def get_context_window(self) -> list[dict]:
         return self.message_history[-6:]

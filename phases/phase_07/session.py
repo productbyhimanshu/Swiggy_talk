@@ -8,10 +8,8 @@ _sessions: dict[str, ConversationState] = {}
 def get_session(session_id: str) -> ConversationState:
     """Retrieve or create a conversation state."""
     if session_id not in _sessions:
-        # In phase 5/6 we had some extra properties. We'll ensure they exist.
+        # address_id starts as None — resolved via get_addresses + user pick
         state = ConversationState(session_id=session_id)
-        # Mock default address_id for tests
-        state.address_id = "107675381"
         _sessions[session_id] = state
     return _sessions[session_id]
 

@@ -59,6 +59,11 @@ def update_env_file(**env_vars: str) -> None:
     log.info("env_updated", keys=list(env_vars.keys()))
 
 
+# Module-level store: state_token → (verifier, timestamp)
+# Lets multiple concurrent auth sessions work without DB dependency.
+_PENDING_AUTH: dict[str, tuple[str, float]] = {}
+
+
 class SwiggyAuthService:
     """OAuth 2.1 + PKCE against Swiggy (Clientless)."""
 
@@ -106,14 +111,30 @@ class SwiggyAuthService:
         
         return client_id
 
-    def build_authorization_url(
-        self, challenge: str, state: str
-    ) -> str:
+    def build_authorization_url(self) -> tuple[str, str]:
         """
-        Build authorize URL pointing to swiggy_oauth_base_url/auth/authorize.
+        Generate a fresh PKCE pair, build the Swiggy authorize URL, and store
+        the verifier so exchange_code() can retrieve it by state token.
+
+        Returns:
+            (url, state_token) — redirect the browser to url; state_token is
+            echoed back by Swiggy in the callback and used to look up the verifier.
         """
         if not self.settings.swiggy_oauth_client_id:
-            raise SwiggyAuthError("SWIGGY_OAUTH_CLIENT_ID is required but not set in .env")
+            # Try dynamic registration first
+            try:
+                self.register_client()
+            except Exception as exc:
+                raise SwiggyAuthError(
+                    "SWIGGY_OAUTH_CLIENT_ID not set and dynamic registration failed: "
+                    f"{exc}"
+                ) from exc
+
+        verifier, challenge = generate_pkce_pair()
+        state_token = secrets.token_urlsafe(16)
+
+        # Persist verifier keyed by state (expires after 10 min in production; kept simple here)
+        _PENDING_AUTH[state_token] = (verifier, time.time())
 
         params = {
             "response_type": "code",
@@ -121,15 +142,35 @@ class SwiggyAuthService:
             "redirect_uri": self.settings.swiggy_oauth_redirect_uri,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
-            "state": state,
+            "state": state_token,
             "scope": "mcp:tools",
         }
         base_url = self.settings.swiggy_oauth_base_url.rstrip("/")
         url = f"{base_url}/auth/authorize?{urlencode(params)}"
-        return url
+        return url, state_token
 
-    def exchange_code(self, code: str, verifier: str) -> tuple[str, int]:
-        """Exchange authorization code for access token. Returns (token, expires_in)."""
+    async def exchange_code(self, code: str, state_token: str | None = None) -> None:
+        """
+        Exchange authorization code for access token and persist to .env.
+
+        The verifier is looked up from _PENDING_AUTH using state_token (set by
+        build_authorization_url). Falls back to a direct exchange without verifier
+        for legacy callers that pass the verifier positionally.
+        """
+        # Look up verifier from pending auth store
+        verifier: str | None = None
+        if state_token and state_token in _PENDING_AUTH:
+            verifier, _ts = _PENDING_AUTH.pop(state_token)
+        elif state_token:
+            # state_token might itself be the verifier (legacy CLI path)
+            verifier = state_token
+
+        if not verifier:
+            raise SwiggyAuthError(
+                "No PKCE verifier found for this state token. "
+                "Restart the auth flow via /auth/swiggy/login."
+            )
+
         payload: dict[str, str] = {
             "grant_type": "authorization_code",
             "code": code,
@@ -138,10 +179,9 @@ class SwiggyAuthService:
             "redirect_uri": self.settings.swiggy_oauth_redirect_uri,
         }
 
-        # Sync httpx call for the CLI script
         base_url = self.settings.swiggy_oauth_base_url.rstrip("/")
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
                 f"{base_url}/auth/token",
                 json=payload,
                 headers={"Content-Type": "application/json"},
@@ -155,7 +195,15 @@ class SwiggyAuthService:
         data = response.json()
         access_token = data["access_token"]
         expires_in = int(data.get("expires_in", 432000))
-        return access_token, expires_in
+        expiry = time.time() + expires_in
+        update_env_file(
+            SWIGGY_ACCESS_TOKEN=access_token,
+            SWIGGY_TOKEN_EXPIRY=str(expiry),
+        )
+        # Bust the lru_cache so the new token is visible immediately
+        from phases.phase_00.config import get_settings as _gs
+        _gs.cache_clear()
+        log.info("oauth_token_saved", expires_in=expires_in)
 
 
 # ── CLI Runner ────────────────────────────────────────────────────────────────
