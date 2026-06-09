@@ -7,11 +7,11 @@ search_restaurants text blob format:
   "Found 10 restaurants for \"pizza\":\n
    1. Domino's Pizza — Pizzas, Italian | 4.3★ | 25 min | ₹400 for two (ID: 45605)\n"
 
-get_addresses text blob format (observed):
-  "1. Home — 123 Indiranagar, Bangalore (ID: 107675381)\n
-   2. Work — 456 MG Road, Bangalore (ID: 98765432)\n"
-  or with full street:
-  "1. Home\n   Full address text (ID: 107675381)\n"
+get_addresses text blob format (confirmed from live API):
+  "Found 8 saved addresses:
+   1. [Other] Himanshu Mahawar: Hotel Vachi Inn, Malviya Nagar, ... (ID: 107675381)
+   2. [home] Himanshu Mahawar: 6, Unnamed Road, Amer, ... (ID: 92680741)
+   ..."
 
 This module parses those blobs into lists of plain dicts that the
 scorer, persona, address picker, and frontend can consume.
@@ -20,6 +20,7 @@ scorer, persona, address picker, and frontend can consume.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 # Matches one restaurant line in the Swiggy search_restaurants text blob.
 # Format: N. Name [(Ad)] — Cuisines | Rating★ | ETA min | ₹Cost for two (ID: id)
@@ -41,28 +42,38 @@ _RESTAURANT_RE = re.compile(
 
 
 # ── Address parsing ───────────────────────────────────────────────────────────
-# Swiggy get_addresses returns a text blob.  We try multiple patterns because
-# the exact format has varied across API versions.
+# Real Swiggy format (confirmed live):
+#   "N. [Label] Person Name: Full Address, City, State PIN (ID: 12345)"
+# e.g.:
+#   "1. [Other] Himanshu Mahawar: Hotel Vachi Inn, Malviya Nagar, ... (ID: 107675381)"
+#   "2. [home] Himanshu Mahawar: 6, Unnamed Road, Amer, ... (ID: 92680741)"
 
-# Pattern A: "N. Label — Full address (ID: 12345)"
-_ADDR_RE_A = re.compile(
-    r"\d+\.\s+"
-    r"([^\n—–(]+?)"          # label e.g. "Home" or "Work"
-    r"\s*[—–]\s*"
-    r"([^\n(]+?)"            # full address text
-    r"\s*\(ID:\s*(\w+)\)",
+_ADDR_RE = re.compile(
+    r"\d+\.\s+"           # "1. "
+    r"\[([^\]]+)\]"        # [Label]  — e.g. "Other", "home", "Hotel"
+    r"\s+[^:]+:\s*"        # " Person Name: "
+    r"([^\n(]+?)"          # full address (stops before "(ID: ...")
+    r"\s*\(ID:\s*(\w+)\)", # (ID: 12345)
     re.UNICODE,
 )
 
-# Pattern B: just "(ID: 12345)" anywhere on a line that also has a label keyword
-_ADDR_RE_B = re.compile(
-    r"(Home|Work|Other|Office|Flat|house|Apartment|hostel)[^\n]*"
-    r"\(ID:\s*(\w+)\)",
-    re.IGNORECASE | re.UNICODE,
-)
 
-# Pattern C: bare "addressId": "12345" (JSON-ish fallback)
-_ADDR_RE_C = re.compile(r'"?addressId"?\s*[:\s]\s*"?(\w+)"?', re.IGNORECASE)
+def _short_area(address: str) -> str:
+    """
+    Extract a short, human-readable area name from a full address string.
+    Takes the first non-trivial comma-segment (not a bare number or 'Unnamed Road').
+    Truncated to 28 chars so it fits comfortably in a chip.
+    """
+    parts = [p.strip() for p in address.split(",")]
+    for part in parts[:4]:
+        if (
+            part
+            and not part.replace(" ", "").isdigit()
+            and "unnamed" not in part.lower()
+            and len(part) > 2
+        ):
+            return part[:28]
+    return parts[0][:28] if parts else address[:28]
 
 
 def parse_addresses(content: list[dict]) -> list[dict]:
@@ -72,52 +83,56 @@ def parse_addresses(content: list[dict]) -> list[dict]:
     Each dict has:
         addressId (str), label (str), address (str), chip (str)
 
-    chip is the quick-reply text shown to the user: "📍 Home", "📍 Work", etc.
+    chip is the quick-reply text shown to the user: "📍 Home", "📍 Hotel",
+    "📍 Malviya Nagar" etc.  Duplicate chips are suffixed " (2)", " (3)" …
     """
-    addresses: list[dict] = []
+    raw: list[dict] = []
+
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "text":
             continue
         text = block.get("text", "")
-
-        # Try Pattern A first (most descriptive)
-        matches_a = list(_ADDR_RE_A.finditer(text))
-        if matches_a:
-            for m in matches_a:
-                label, addr, addr_id = m.groups()
-                label = label.strip()
-                addresses.append({
-                    "addressId": addr_id.strip(),
-                    "label": label,
-                    "address": addr.strip(),
-                    "chip": f"📍 {label}",
-                })
-            continue
-
-        # Try Pattern B
-        matches_b = list(_ADDR_RE_B.finditer(text))
-        if matches_b:
-            for m in matches_b:
-                label, addr_id = m.groups()
-                label = label.strip().title()
-                addresses.append({
-                    "addressId": addr_id.strip(),
-                    "label": label,
-                    "address": label,
-                    "chip": f"📍 {label}",
-                })
-            continue
-
-        # Pattern C — bare IDs, try to pair with surrounding label text
-        ids = _ADDR_RE_C.findall(text)
-        for i, addr_id in enumerate(ids):
-            label = f"Address {i + 1}"
-            addresses.append({
+        for m in _ADDR_RE.finditer(text):
+            label_raw, address, addr_id = m.groups()
+            raw.append({
                 "addressId": addr_id.strip(),
-                "label": label,
-                "address": label,
-                "chip": f"📍 {label}",
+                "label":     label_raw.strip().title(),   # "other" → "Other"
+                "address":   address.strip(),
             })
+
+    if not raw:
+        return raw
+
+    # Count how many times each label appears so we know when to disambiguate
+    label_counts = Counter(e["label"] for e in raw)
+
+    addresses: list[dict] = []
+    chip_seen: dict[str, int] = {}
+
+    for entry in raw:
+        label = entry["label"]
+        if label_counts[label] == 1:
+            # Unique label — show it directly: "📍 Home", "📍 Hotel"
+            base_chip = f"📍 {label}"
+        else:
+            # Multiple addresses share this label (most often "Other") —
+            # use the neighbourhood instead so the user can tell them apart.
+            base_chip = f"📍 {_short_area(entry['address'])}"
+
+        # Enforce global chip uniqueness with a numeric suffix
+        if base_chip not in chip_seen:
+            chip_seen[base_chip] = 1
+            chip = base_chip
+        else:
+            chip_seen[base_chip] += 1
+            chip = f"{base_chip} ({chip_seen[base_chip]})"
+
+        addresses.append({
+            "addressId": entry["addressId"],
+            "label":     label,
+            "address":   entry["address"],
+            "chip":      chip,
+        })
 
     return addresses
 

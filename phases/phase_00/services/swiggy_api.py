@@ -97,8 +97,7 @@ class SwiggyApiClient:
 
     async def _invoke_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         token = self._require_token()
-        print(f"RAW TOKEN: {repr(token)}")
-        
+
         payload = {
             "jsonrpc": "2.0",
             "method": "tools/call",
@@ -114,8 +113,6 @@ class SwiggyApiClient:
             "Accept": "application/json, text/event-stream",
         }
         
-        print(f"HEADERS: {headers}")
-
         url = self.settings.swiggy_food_url.rstrip("/")
         log.info("swiggy_tool_call", tool=name, write=name in WRITE_TOOLS)
 
