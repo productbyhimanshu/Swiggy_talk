@@ -1,15 +1,18 @@
-import { Cart, More } from "../../icons/index.jsx";
+import { Cart, More, Pin } from "../../icons/index.jsx";
 
-export default function AppBar({ cartCount, onCart }) {
+export default function AppBar({ cartCount, onCart, address, onAddressClick }) {
+  const label = address?.chip || address?.label;
+
   return (
     <div className="app-bar">
       <div className="crest">B</div>
       <div className="who">
         <div className="name">bhook</div>
-        <div className="status">
-          <span className="live" />
-          online · talk yourself fed
-        </div>
+        <button className="address-cta" onClick={onAddressClick}>
+          <Pin />
+          <span>{label || "Select Address"}</span>
+          <span className="address-cta-arrow">›</span>
+        </button>
       </div>
       <div className="right">
         <button className="icon-btn" aria-label="cart" onClick={onCart}>

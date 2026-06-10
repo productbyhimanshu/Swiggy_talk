@@ -142,41 +142,28 @@ button { font-family: inherit; cursor: pointer; border: none; }
   border: 1.5px solid var(--bg);
 }
 
-/* ── Address pill ────────────────────────────────────────────── */
-.address-pill {
-  margin: 0 18px 4px;
-  display: flex; align-items: center; gap: 8px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 6px 10px 6px 8px;
-  font-size: 12px;
-  color: var(--ink-2);
-  width: fit-content;
-  box-shadow: var(--shadow-sm);
-  cursor: pointer;
+/* ── Address CTA (inside AppBar) ────────────────────────────── */
+.address-cta {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: none; border: none;
+  padding: 0;
   font-family: inherit;
-  text-align: left;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--curry);
+  cursor: pointer;
+  letter-spacing: -0.005em;
+  transition: color 0.12s ease;
+  margin-top: 2px;
 }
-.address-pill:hover {
-  border-color: var(--curry);
-  background: var(--curry-soft);
-  color: var(--curry-deep);
-}
-.address-pill:hover b { color: var(--curry-deep); }
-.address-pill:active { transform: scale(0.98); }
-.address-pill .pin { color: var(--curry); display: flex; }
-.address-pill b { color: var(--ink); font-weight: 700; }
-.address-pill-placeholder { color: var(--mute); font-style: italic; }
-.address-pill-caret {
-  color: var(--mute);
-  font-size: 15px;
+.address-cta svg { width: 11px; height: 11px; flex: none; }
+.address-cta:hover { color: var(--curry-deep); }
+.address-cta:active { opacity: 0.75; }
+.address-cta-arrow {
+  font-size: 13px;
   line-height: 1;
-  margin-left: 1px;
-  transition: color 0.15s ease;
+  opacity: 0.7;
 }
-.address-pill:hover .address-pill-caret { color: var(--curry-deep); }
 
 /* ── Desktop rail address button ────────────────────────────── */
 .rail-addr-btn {

@@ -7,7 +7,6 @@ import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
 import EmptyHello from "./EmptyHello";
 import AppBar from "./AppBar";
-import AddressPill from "./AddressPill";
 import AddressSheet from "./AddressSheet";
 import Composer from "./Composer";
 import SwitchSheet from "./SwitchSheet";
@@ -54,8 +53,12 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
       data-layout={layout}
       data-density={density !== "default" ? density : undefined}
     >
-      <AppBar cartCount={cartState.cartCount} onCart={() => setBasketOpen(true)} />
-      <AddressPill address={addr.selected} onClick={addr.open} />
+      <AppBar
+        cartCount={cartState.cartCount}
+        onCart={() => setBasketOpen(true)}
+        address={addr.selected}
+        onAddressClick={addr.open}
+      />
 
       <div className="stream" ref={streamRef}>
         {isEmpty && (
