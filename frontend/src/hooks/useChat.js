@@ -13,14 +13,12 @@ const uid = () => `m${++_uid}`;
 export function useChat() {
   const [messages, setMessages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
-  const [deliveryAddress, setDeliveryAddress] = useState(null); // { label, chip, addressId }
   const sessionId = useRef(uid());
 
   const push = useCallback((msg) =>
     setMessages((prev) => [...prev, { id: uid(), ...msg }]),
   []);
 
-  // Mark all QR rows on older messages as consumed (stale)
   const consumeOlderQR = useCallback(() => {
     setMessages((prev) =>
       prev.map((m) =>
@@ -53,16 +51,7 @@ export function useChat() {
             });
           } else if (event.type === "cards") {
             push({ type: "cards", dishes: event.dishes || [], refine: true });
-          } else if (event.type === "address_confirmed") {
-            // Backend confirmed which address was selected — update the pill
-            setDeliveryAddress({
-              label:     event.label     || "",
-              chip:      event.chip      || event.label || "",
-              addressId: event.addressId || "",
-              address:   event.address   || "",
-            });
           }
-          // cart_update handled in Phase 9
         }
       } catch {
         push({
@@ -84,11 +73,13 @@ export function useChat() {
   }, []);
 
   const reset = useCallback(() => {
+    sessionId.current = uid();
     setMessages([]);
     setIsTyping(false);
-    setDeliveryAddress(null);
-    sessionId.current = uid();
   }, []);
 
-  return { messages, isTyping, deliveryAddress, sendMessage, markQRConsumed, reset };
+  // Expose sessionId.current — re-read on every render so callers always
+  // get the current value (changes on reset() which also triggers a re-render
+  // via setMessages).
+  return { messages, isTyping, sessionId: sessionId.current, sendMessage, markQRConsumed, reset };
 }

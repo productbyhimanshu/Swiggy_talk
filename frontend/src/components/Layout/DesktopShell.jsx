@@ -1,23 +1,26 @@
 import { useRef, useEffect, useState } from "react";
 import { useChat } from "../../hooks/useChat";
 import { useCart } from "../../hooks/useCart";
+import { useAddress } from "../../hooks/useAddress";
 import { SEED_CHIPS, COMPOSER_SEEDS } from "../../data/seed.js";
 import { Pin, Refresh } from "../../icons/index.jsx";
 import MessageBubble from "../Chat/MessageBubble";
 import TypingIndicator from "../Chat/TypingIndicator";
 import EmptyHello from "../Chat/EmptyHello";
 import Composer from "../Chat/Composer";
+import AddressSheet from "../Chat/AddressSheet";
 import SwitchSheet from "../Chat/SwitchSheet";
 import DishCardList from "../Recommendations/DishCardList";
 import DesktopCart from "../Cart/DesktopCart";
 
 export default function DesktopShell({ shape = "rounded", layout = "carousel", density = "default" }) {
-  const chat = useChat();
+  const chat      = useChat();
   const cartState = useCart();
+  const addr      = useAddress(chat.sessionId);
   const [input, setInput] = useState("");
   const streamRef = useRef();
 
-  const isEmpty = chat.messages.length === 0;
+  const isEmpty  = chat.messages.length === 0;
   const lastAiId = [...chat.messages].reverse().find((m) => m.type === "ai")?.id;
 
   useEffect(() => {
@@ -44,7 +47,11 @@ export default function DesktopShell({ shape = "rounded", layout = "carousel", d
   function handleReset() {
     chat.reset();
     cartState.clearCart();
+    addr.resetFetch();
   }
+
+  const addressLabel = addr.selected?.chip || addr.selected?.label;
+  const addressSub   = addr.selected?.address || "tap to set location";
 
   return (
     <div className="desktop-shell">
@@ -58,12 +65,23 @@ export default function DesktopShell({ shape = "rounded", layout = "carousel", d
           </div>
         </div>
 
-        <div className="rail-card">
+        {/* Address card — clickable */}
+        <button className="rail-card rail-addr-btn" onClick={addr.open}>
           <div className="rail-card-label"><Pin /> delivering to</div>
-          <div className="rail-card-title">Home</div>
-          <div className="rail-card-sub">Indiranagar, 12th Main · 560038</div>
-          <button className="rail-link">change address →</button>
-        </div>
+          <div className="rail-card-title">
+            {addressLabel || <span style={{ color: "var(--mute)", fontWeight: 500 }}>Set address</span>}
+          </div>
+          <div className="rail-card-sub" title={addr.selected?.address || ""}>
+            {addr.selected
+              ? addr.selected.address.length > 48
+                ? addr.selected.address.slice(0, 48) + "…"
+                : addr.selected.address
+              : "tap to set location"}
+          </div>
+          <span className="rail-link">
+            {addr.selected ? "change address →" : "pick address →"}
+          </span>
+        </button>
 
         <div className="sec-label">try one of these</div>
         <div className="seed-chips">
@@ -147,6 +165,9 @@ export default function DesktopShell({ shape = "rounded", layout = "carousel", d
         incCart={cartState.incCart}
         decCart={cartState.decCart}
       />
+
+      {/* Address picker popup — covers entire desktop shell */}
+      <AddressSheet {...addr} />
 
       {cartState.pendingSwitch && (
         <SwitchSheet

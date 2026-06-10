@@ -1,12 +1,14 @@
 import { useState, useRef, useEffect } from "react";
 import { useChat } from "../../hooks/useChat";
 import { useCart } from "../../hooks/useCart";
+import { useAddress } from "../../hooks/useAddress";
 import { SEED_CHIPS, COMPOSER_SEEDS } from "../../data/seed.js";
 import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
 import EmptyHello from "./EmptyHello";
 import AppBar from "./AppBar";
 import AddressPill from "./AddressPill";
+import AddressSheet from "./AddressSheet";
 import Composer from "./Composer";
 import SwitchSheet from "./SwitchSheet";
 import DishCardList from "../Recommendations/DishCardList";
@@ -14,18 +16,16 @@ import CartBar from "../Cart/CartBar";
 import BasketSheet from "../Cart/BasketSheet";
 
 export default function ChatPanel({ shape = "rounded", layout = "carousel", density = "default" }) {
-  const chat = useChat();
+  const chat      = useChat();
   const cartState = useCart();
-  const [input, setInput] = useState("");
+  const addr      = useAddress(chat.sessionId);
+  const [input, setInput]           = useState("");
   const [basketOpen, setBasketOpen] = useState(false);
   const streamRef = useRef();
 
-  const isEmpty = chat.messages.length === 0;
+  const isEmpty   = chat.messages.length === 0;
+  const lastAiId  = [...chat.messages].reverse().find((m) => m.type === "ai")?.id;
 
-  // last AI message id (for stale QR logic)
-  const lastAiId = [...chat.messages].reverse().find((m) => m.type === "ai")?.id;
-
-  // scroll to bottom on new messages
   useEffect(() => {
     const el = streamRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -40,9 +40,7 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
 
   function handleAdd(dish) {
     const added = cartState.addToCart(dish);
-    if (added) {
-      chat.sendMessage(`add ${dish.name.toLowerCase()}`);
-    }
+    if (added) chat.sendMessage(`add ${dish.name.toLowerCase()}`);
   }
 
   function handleResuggest() {
@@ -57,10 +55,7 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
       data-density={density !== "default" ? density : undefined}
     >
       <AppBar cartCount={cartState.cartCount} onCart={() => setBasketOpen(true)} />
-      <AddressPill
-        address={chat.deliveryAddress}
-        onClick={() => chat.sendMessage("change address")}
-      />
+      <AddressPill address={addr.selected} onClick={addr.open} />
 
       <div className="stream" ref={streamRef}>
         {isEmpty && (
@@ -119,6 +114,9 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
         seeds={isEmpty ? COMPOSER_SEEDS : null}
         onSeed={(text) => { chat.sendMessage(text); }}
       />
+
+      {/* Address picker popup */}
+      <AddressSheet {...addr} />
 
       <BasketSheet
         open={basketOpen}

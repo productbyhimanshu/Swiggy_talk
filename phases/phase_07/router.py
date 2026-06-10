@@ -1,25 +1,19 @@
 """FastAPI SSE router (Architecture §8).
 
 Address resolution rule (architecture §2):
-  - NEVER use GPS / coordinates.
-  - address_id comes exclusively from get_addresses → user selection.
-  - On the first message of every session: call get_addresses.
-      • 1 address  → auto-select silently, emit address_confirmed event.
-      • 2+ addresses → show chips, pause until user picks.
-  - Safety net: if address_id is still None before any search, re-fetch.
-  - "change address" message: reset state → re-fetch → show picker.
-  - Original query saved in state.pending_search_query, replayed after pick.
+  - address_id is set via POST /api/set-address (frontend popup flow).
+  - NEVER via GPS.  NEVER injected into the chat message stream.
+  - If a search is attempted without an address, a single gentle bubble is
+    returned asking the user to tap the 📍 button; no gate, no blocking loop.
 
 SSE event types emitted:
-  bubble           — AI chat bubble with optional quick_replies[]
-  cards            — restaurant card list
-  cart_update      — cart total change
-  address_confirmed — address was selected; payload: {label, chip, addressId}
-  [DONE]           — stream end sentinel
+  bubble      — AI chat bubble with optional quick_replies[]
+  cards       — restaurant card list
+  cart_update — cart total change
+  [DONE]      — stream end sentinel
 """
 
 import json
-import re
 import asyncio
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -40,121 +34,52 @@ from phases.phase_07.session import get_session
 log = get_logger(__name__)
 router = APIRouter()
 
-# Regex for user-initiated "change my address" intent
-_CHANGE_ADDR_RE = re.compile(
-    r"\b(change|switch|update|edit|pick|select|use\s+different|another)\s+(address|location|delivery|place)\b",
-    re.IGNORECASE,
-)
 
+# ── Request / response models ─────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     session_id: str
     message: str
 
 
-# ── Address resolution helpers ────────────────────────────────────────────────
-
-def _address_confirmed_event(addr: dict) -> str:
-    """Return a JSON string for the address_confirmed SSE event."""
-    return json.dumps({
-        "type":      "address_confirmed",
-        "label":     addr.get("label", ""),
-        "chip":      addr.get("chip", ""),
-        "addressId": addr.get("addressId", ""),
-        "address":   addr.get("address", ""),
-    })
+class SetAddressRequest(BaseModel):
+    session_id: str
+    address_id: str
+    label: str = ""
+    chip:  str = ""
+    address: str = ""
 
 
-async def _fetch_and_resolve_address(
-    state: ConversationState,
-    swiggy_client: SwiggyReadClient,
-    pending_query: str,
-):
+# ── Address REST endpoints ────────────────────────────────────────────────────
+
+@router.get("/api/addresses")
+async def addresses_endpoint(session_id: str):
     """
-    Call get_addresses, then either:
-    - Auto-select (1 address):  set state.address_id, yield confirmation bubble
-                                + address_confirmed event.
-    - Show picker (2+ addresses): yield chip bubble, set awaiting_address_pick.
-    - Error / 0 addresses:       yield error bubble.
-
-    Yields raw JSON strings (caller wraps in "data: ...\n\n").
-    After this generator finishes, check state.address_id to know if address
-    was resolved (auto-select) or if we need to wait for user reply (picker).
+    Return the user's saved Swiggy delivery addresses.
+    Called by the frontend address picker popup — never from the chat flow.
     """
+    swiggy_client = SwiggyReadClient()
     try:
         addresses = await swiggy_client.get_addresses()
+        return {"addresses": addresses}
     except Exception as exc:
-        log.error("get_addresses_failed", error=str(exc))
-        yield json.dumps({
-            "type": "bubble",
-            "text": "Couldn't fetch your saved addresses right now 😕 — try again in a moment.",
-            "quick_replies": ["Try again"],
-        })
-        return
-
-    if not addresses:
-        yield json.dumps({
-            "type": "bubble",
-            "text": "No saved addresses found on your Swiggy account. "
-                    "Please add one in the Swiggy app first.",
-            "quick_replies": [],
-        })
-        return
-
-    # Cache in state so the address-pick reply can resolve a chip back to an ID
-    state.addresses = addresses
-
-    if len(addresses) == 1:
-        addr = addresses[0]
-        state.address_id = addr["addressId"]
-        log.info("address_auto_selected", address_id=state.address_id, label=addr.get("label"))
-        yield json.dumps({
-            "type": "bubble",
-            "text": f"Delivering to {addr.get('chip', addr.get('label', 'your address'))} 📍",
-            "quick_replies": [],
-        })
-        yield _address_confirmed_event(addr)
-        return  # state.address_id is now set → caller continues pipeline
-
-    # Multiple addresses — show picker, pause pipeline until user picks
-    state.awaiting_address_pick = True
-    state.pending_search_query = pending_query
-    chips = [a["chip"] for a in addresses]
-    yield json.dumps({
-        "type": "bubble",
-        "text": "Where should I deliver? Pick your address 👇",
-        "quick_replies": chips,
-    })
-    # state.address_id remains None → caller yields [DONE] and returns
+        log.error("get_addresses_endpoint_failed", error=str(exc))
+        return {"addresses": [], "error": str(exc)}
 
 
-def _resolve_chip_to_address(msg: str, addresses: list[dict]) -> dict | None:
+@router.post("/api/set-address")
+async def set_address_endpoint(req: SetAddressRequest):
     """
-    Match user's chip-tap reply to one of the stored address dicts.
-    Strips the 📍 prefix and does case-insensitive comparison.
-    Returns the matching address dict or None.
+    Store the user-selected addressId in session state.
+    Called when the user picks an address in the popup.
     """
-    msg_clean = msg.strip().lower()
-    for prefix in ("📍 ", "📍", "📌 ", "📌"):
-        if msg_clean.startswith(prefix):
-            msg_clean = msg_clean[len(prefix):]
-            break
-    msg_clean = msg_clean.strip()
-
-    for addr in addresses:
-        chip_clean = addr.get("chip", "").lower()
-        for prefix in ("📍 ", "📍", "📌 ", "📌"):
-            if chip_clean.startswith(prefix):
-                chip_clean = chip_clean[len(prefix):]
-                break
-        chip_clean = chip_clean.strip()
-        label_clean = addr.get("label", "").lower().strip()
-        if msg_clean in (chip_clean, label_clean):
-            return addr
-    return None
+    state = get_session(req.session_id)
+    state.address_id = req.address_id
+    log.info("address_set_via_popup", session=req.session_id, address_id=req.address_id, label=req.label)
+    return {"ok": True}
 
 
-# ── Main SSE generator ────────────────────────────────────────────────────────
+# ── Chat SSE endpoint ─────────────────────────────────────────────────────────
 
 async def stream_response(request: ChatRequest, client_request: Request):
     """Async generator that yields SSE events."""
@@ -175,60 +100,19 @@ async def stream_response(request: ChatRequest, client_request: Request):
     msg = request.message.strip()
     state.append_message("user", msg)
 
-    # ── 2. "Change address" shortcut ─────────────────────────────────────────
-    # Detected before any other routing — resets address state and re-shows picker.
-    if _CHANGE_ADDR_RE.search(msg):
-        state.address_id = None
-        state.addresses = []
-        state.awaiting_address_pick = False
-        state.pending_search_query = None
-        async for payload in _fetch_and_resolve_address(state, swiggy_client, ""):
-            yield f"data: {payload}\n\n"
+    # ── 2. Classify route ─────────────────────────────────────────────────────
+    route = classify(msg, state)
+
+    # ── 3. Address guard (non-blocking) ──────────────────────────────────────
+    # If the user is trying to search but hasn't set an address yet, nudge them
+    # to use the 📍 button — don't block the whole conversation.
+    search_routes = (Route.NEW_SEARCH, Route.AMBIGUOUS, Route.REFINE, Route.IN_RESTAURANT, Route.SCHEDULE)
+    if route in search_routes and not state.address_id:
+        yield f"data: {json.dumps({'type': 'bubble', 'text': 'Tap 📍 above to set your delivery address first — then I can find restaurants near you!', 'quick_replies': []})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
-    # ── 3. Address-pick reply handler ─────────────────────────────────────────
-    # User is answering a "pick address" prompt — resolve before normal routing.
-    if state.awaiting_address_pick:
-        matched = _resolve_chip_to_address(msg, state.addresses)
-        if matched:
-            state.address_id = matched["addressId"]
-            state.awaiting_address_pick = False
-            log.info("address_selected", address_id=state.address_id, label=matched.get("label"))
-            confirm_text = f"Got it — delivering to {matched['chip']} 📍"
-            yield f"data: {json.dumps({'type': 'bubble', 'text': confirm_text, 'quick_replies': []})}\n\n"
-            yield f"data: {_address_confirmed_event(matched)}\n\n"
-            # Resume the original query
-            if state.pending_search_query:
-                msg = state.pending_search_query
-                state.pending_search_query = None
-                state.append_message("user", msg)
-                # Fall through to pipeline with the restored query
-            else:
-                yield "data: [DONE]\n\n"
-                return
-        else:
-            # Didn't match any chip — re-show picker
-            chips = [a["chip"] for a in state.addresses]
-            yield f"data: {json.dumps({'type': 'bubble', 'text': 'Please tap one of the options 👇', 'quick_replies': chips})}\n\n"
-            yield "data: [DONE]\n\n"
-            return
-
-    # ── 4. Address init — run whenever address_id is missing ──────────────────
-    # Fires on session start and as safety net whenever address_id is cleared.
-    if not state.address_id and not state.awaiting_address_pick:
-        async for payload in _fetch_and_resolve_address(state, swiggy_client, msg):
-            yield f"data: {payload}\n\n"
-        if not state.address_id:
-            # Picker chips were sent — wait for user to pick
-            yield "data: [DONE]\n\n"
-            return
-        # Single address auto-selected — continue pipeline
-
-    # ── 5. Classify route ─────────────────────────────────────────────────────
-    route = classify(msg, state)
-
-    # Fast path for CART_ACTION
+    # ── 4. Fast path for CART_ACTION ─────────────────────────────────────────
     if route == Route.CART_ACTION:
         state.cart_has_items = True
         bubbles = await route_message(route, UserIntent(), state, swiggy_client, gemini_client)
@@ -239,7 +123,7 @@ async def stream_response(request: ChatRequest, client_request: Request):
         yield "data: [DONE]\n\n"
         return
 
-    # ── 6. Parse intent (Agent 1) ─────────────────────────────────────────────
+    # ── 5. Parse intent (Agent 1) ─────────────────────────────────────────────
     intent = state.current_intent or UserIntent()
     if route in (Route.NEW_SEARCH, Route.REFINE, Route.AMBIGUOUS):
         try:
@@ -249,13 +133,13 @@ async def stream_response(request: ChatRequest, client_request: Request):
             log.error("intent_parse_failed", error=str(exc))
             intent = UserIntent()
 
-    # ── 7. Run pipeline (Agents 2 + 3 + 4 via phase_06) ─────────────────────
+    # ── 6. Run pipeline (Agents 2 + 3 + 4 via phase_06) ─────────────────────
     start = asyncio.get_event_loop().time()
     bubbles = await route_message(route, intent, state, swiggy_client, gemini_client)
     elapsed_ms = round((asyncio.get_event_loop().time() - start) * 1000)
     log.info("pipeline_complete", route=route.value, latency_ms=elapsed_ms)
 
-    # ── 8. Stream bubbles ─────────────────────────────────────────────────────
+    # ── 7. Stream bubbles ─────────────────────────────────────────────────────
     for i, bubble in enumerate(bubbles):
         if await client_request.is_disconnected():
             log.warning("client_disconnected_mid_stream")
@@ -265,7 +149,7 @@ async def stream_response(request: ChatRequest, client_request: Request):
         bubble.setdefault("type", "bubble")
         yield f"data: {json.dumps(bubble)}\n\n"
 
-    # ── 9. Stream restaurant cards ────────────────────────────────────────────
+    # ── 8. Stream restaurant cards ────────────────────────────────────────────
     if route in (Route.NEW_SEARCH, Route.REFINE, Route.AMBIGUOUS) and state.has_recommendations:
         yield f"data: {json.dumps({'type': 'cards', 'dishes': state.cached_results[:6]})}\n\n"
 
