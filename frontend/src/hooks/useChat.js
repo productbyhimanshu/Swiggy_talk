@@ -15,9 +15,13 @@ export function useChat() {
   const [isTyping, setIsTyping] = useState(false);
   const sessionId = useRef(uid());
 
-  const push = useCallback((msg) =>
-    setMessages((prev) => [...prev, { id: uid(), ...msg }]),
-  []);
+  // push returns the id of the new message so the caller can later remove
+  // or update it (e.g. the placeholder "thinking" bubble).
+  const push = useCallback((msg) => {
+    const id = uid();
+    setMessages((prev) => [...prev, { id, ...msg }]);
+    return id;
+  }, []);
 
   const consumeOlderQR = useCallback(() => {
     setMessages((prev) =>
@@ -37,12 +41,27 @@ export function useChat() {
       setIsTyping(true);
       let firstBubble = false;
 
+      let thinkingMsgId = null;
+
       try {
         for await (const event of streamChat(trimmed, sessionId.current)) {
-          if (event.type === "bubble") {
+          if (event.type === "thinking") {
+            // Placeholder shown immediately so the user sees activity while
+            // the backend runs intent → search → menus → persona. Replaced
+            // by the first real bubble.
+            if (!thinkingMsgId) {
+              setIsTyping(false);
+              thinkingMsgId = push({ type: "ai", text: event.text, pending: true });
+            }
+          } else if (event.type === "bubble") {
             if (!firstBubble) {
               firstBubble = true;
               setIsTyping(false);
+            }
+            // Drop the placeholder once the real reply arrives.
+            if (thinkingMsgId) {
+              setMessages((prev) => prev.filter((m) => m.id !== thinkingMsgId));
+              thinkingMsgId = null;
             }
             push({
               type: "ai",
@@ -50,6 +69,10 @@ export function useChat() {
               quickReplies: event.quick_replies?.length ? event.quick_replies : null,
             });
           } else if (event.type === "cards") {
+            if (thinkingMsgId) {
+              setMessages((prev) => prev.filter((m) => m.id !== thinkingMsgId));
+              thinkingMsgId = null;
+            }
             push({ type: "cards", dishes: event.dishes || [], refine: true });
           }
         }

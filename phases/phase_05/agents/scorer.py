@@ -4,7 +4,6 @@ import json
 from phases.phase_01.models.intent import UserIntent
 from phases.phase_04.utils.parse_eta import parse_eta
 from phases.phase_05.utils.weights import get_weights
-import google.generativeai as genai
 
 import logging
 

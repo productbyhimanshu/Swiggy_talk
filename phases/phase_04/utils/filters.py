@@ -16,8 +16,11 @@ from __future__ import annotations
 from phases.phase_01.models.intent import UserIntent
 from phases.phase_04.utils.parse_eta import parse_eta
 
-# Minimum rating to pass the rating gate (architecture §6)
-_MIN_RATING = 4.0
+# Minimum rating to pass the rating gate.
+# Architecture §6 specifies 4.0 but many delivery areas (e.g. Amer/Jaipur)
+# have <5 places rated ≥4.0 — 3.5 keeps the gate meaningful without
+# dead-ending the user. The scorer still ranks higher ratings above lower ones.
+_MIN_RATING = 3.5
 
 # Swiggy hard cart cap (architecture §2)
 _CART_CAP = 1_000

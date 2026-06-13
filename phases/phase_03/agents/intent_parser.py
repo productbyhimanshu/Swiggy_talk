@@ -97,14 +97,13 @@ async def parse_intent(message: str, context: list[dict]) -> UserIntent:
 
 def _call_gemini_sync(message: str, context: list[dict]) -> UserIntent:
     """Synchronous Gemini call — executed in a thread via asyncio.to_thread."""
-    import google.generativeai as genai  # local import keeps startup fast
+    from phases.phase_00.services.gemini_client import GeminiModel  # local import keeps startup fast
 
     settings = get_settings()
     if not settings.gemini_api_key:
         raise IntentParseError("GEMINI_API_KEY not set — cannot call Agent 1")
 
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    model = GeminiModel(api_key=settings.gemini_api_key)
 
     raw_schema = UserIntent.model_json_schema()
     
@@ -188,11 +187,33 @@ def _build_prompt(message: str, context: list[dict]) -> str:
         "Rules:\n"
         "- budget_max must be between 1–5000 INR if present; null otherwise.\n"
         "- timing must be HH:MM 24h format or null.\n"
-        "- veg_nonveg: 'veg', 'nonveg', 'both', 'NEEDS_CLARIFICATION', or null.\n"
+        "- timing_type must be EXACTLY 'deliver_by' or 'order_now' or null — no other values.\n"
+        "- mood must be EXACTLY one of: 'comfort', 'light', 'heavy', 'celebratory', or null — no other values.\n"
+        "- diet must be EXACTLY one of: 'high_protein', 'low_carb', 'healthy', 'comfort', or null.\n"
+        "- veg_nonveg rules (BE STRICT):\n"
+        "    * 'veg' only if user said veg/vegetarian/pure-veg/paneer/no-meat.\n"
+        "    * 'nonveg' only if user said non-veg/chicken/mutton/beef/fish/egg/meat by name.\n"
+        "    * 'both' only if user explicitly said 'either', 'both', 'doesn't matter'.\n"
+        "    * 'NEEDS_CLARIFICATION' is REQUIRED when the cuisine itself can go either way\n"
+        "      and the user didn't specify — e.g. biryani, pizza, burger, pasta, momos,\n"
+        "      thali, chinese, indian, dinner, lunch, snacks, food, anything spicy.\n"
+        "    * null only when cuisine is clearly one-sided (ice cream, dosa-only, salad).\n"
+        "    * When in doubt, use 'NEEDS_CLARIFICATION' — we'd rather ask than guess wrong.\n"
         "- speed: 'fast', 'normal', or null.\n"
         "- Set search_query to the best Swiggy keyword for this request.\n"
         "- If the user is refining a previous request (context shows prior intent), "
         "update only the changed fields; carry forward the rest.\n"
+        "\n"
+        "CONFIDENCE (very important):\n"
+        "- Set confidence between 0.0 and 1.0 — how specific is this request?\n"
+        "    * 1.0 = clear, actionable request (\"chicken biryani under 300\")\n"
+        "    * 0.7 = mostly clear, one missing dimension (\"biryani\" — no diet)\n"
+        "    * 0.4 = vague, multiple missing (\"lunch\" — no cuisine, no budget, no mood)\n"
+        "    * 0.1 = could mean anything (\"food\", \"hungry\")\n"
+        "- When confidence < 0.8, ALSO fill clarify_probe with the single best follow-up question.\n"
+        "  Keep it natural and short: \"for one or sharing?\", \"hot or cold?\", \"going out after?\".\n"
+        "  Avoid \"veg or non-veg?\" — that one is handled by the dedicated NEEDS_CLARIFICATION flag.\n"
+        "- Also fill clarify_options with 2–3 short chip labels for that probe.\n"
         f"{ctx_text}\n"
         f"User message: {message}\n"
         "Return ONLY valid JSON matching the schema."

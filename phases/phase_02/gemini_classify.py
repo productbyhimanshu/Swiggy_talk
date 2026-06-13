@@ -60,11 +60,10 @@ async def gemini_classify(message: str, state: ConversationState) -> Route:
 
 
 def _call_gemini_sync(message: str, state: ConversationState) -> Route:
-    import google.generativeai as genai
+    from phases.phase_00.services.gemini_client import GeminiModel
 
     settings = get_settings()
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash-lite")
+    model = GeminiModel(api_key=settings.gemini_api_key)
 
     context = state.get_context_window()[-2:]
     prompt = (

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     )
 
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    # Emergent universal LLM key — OpenAI-compatible proxy; preferred over
+    # the direct Gemini key when set (no 20 req/day free-tier limit)
+    emergent_llm_key: str = Field(default="", alias="EMERGENT_LLM_KEY")
 
     swiggy_oauth_client_id: str = Field(default="", alias="SWIGGY_OAUTH_CLIENT_ID")
     swiggy_oauth_client_secret: str = Field(

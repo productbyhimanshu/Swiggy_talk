@@ -23,6 +23,7 @@ class MockClientRequest:
 def clean_session():
     clear_session("test_session")
     session = get_session("test_session")
+    session.address_id = "92680741"  # address guard requires this for search routes
     yield session
     clear_session("test_session")
 
@@ -45,12 +46,14 @@ async def test_sse_event_sequence(mock_route, mock_classify, clean_session):
     events = []
     async for event in stream_response(req, client_req):
         events.append(event.strip())
-        
-    assert len(events) == 4
-    assert "Bubble 1" in events[0]
-    assert "Bubble 2" in events[1]
-    assert "cards" in events[2]
-    assert "[DONE]" in events[3]
+
+    # Order: thinking placeholder → bubble 1 → bubble 2 → cards → [DONE]
+    assert len(events) == 5
+    assert "thinking" in events[0]
+    assert "Bubble 1" in events[1]
+    assert "Bubble 2" in events[2]
+    assert "cards" in events[3]
+    assert "[DONE]" in events[4]
 
 
 @pytest.mark.asyncio
@@ -68,8 +71,10 @@ async def test_cart_action_emits_cart_update(mock_route, mock_classify, clean_se
     events = []
     async for event in stream_response(req, client_req):
         events.append(event.strip())
-        
-    assert any("cart_update" in e for e in events)
+
+    # Cart total is frontend state — chat path emits ack bubble + DONE only
+    assert any("Added" in e for e in events)
+    assert "[DONE]" in events[-1]
 
 
 @pytest.mark.asyncio
@@ -112,10 +117,13 @@ async def test_client_disconnect_mid_stream(mock_route, mock_classify, clean_ses
     events = []
     async for event in stream_response(req, client_req):
         events.append(event.strip())
-        
-    # Should only emit first bubble and then stop, no [DONE]
-    assert len(events) == 1
-    assert "1" in events[0]
+
+    # Thinking placeholder fires before the disconnect check kicks in, then
+    # the first bubble fires before the second bubble's disconnect probe.
+    # No [DONE] because disconnect aborts streaming mid-flight.
+    assert len(events) == 2
+    assert "thinking" in events[0]
+    assert "1" in events[1]
     # Ensure state was not corrupted
     assert clean_session.message_history[-1]["text"] == "hello"
 

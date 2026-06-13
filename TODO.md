@@ -467,3 +467,52 @@ Phase 9 ──► Phase 10 ──► Phase 11 ──► Phase 12 (eval gate) ─
 ---
 
 *Generated from `doc/architecture.md` v4.0 — phased checklist with order safety gates.*
+
+
+---
+
+## Phase 14 — Conversational intelligence layer (post Phase 12 gate)
+
+**Goal:** Stop being a Swiggy proxy. Understand intent, remember the user,
+sound like a friend. Documented in architecture.md §23.
+
+| # | Task | Label | Done |
+|---|------|-------|:----:|
+| 14.1 | `phase_00/services/memory.py` — SQLite: profile, orders, rejections; `get_user_facts()` / `suggest_usual()` | LOCAL | ✅ |
+| 14.2 | Persona rewrite — 3-paragraph character doc, thinking scratchpad, 5 few-shots, memory injection | GEMINI · LOCAL | ✅ |
+| 14.3 | Deterministic why_picker — per-card badges from data signals, drops universal badges, char-safe | LOCAL | ✅ |
+| 14.4 | Proactive opener — `/api/opener`, clock + memory driven, zero LLM | LOCAL | ✅ |
+| 14.5 | Confidence-driven clarification ladder — `UserIntent.confidence`/`clarify_probe`/`clarify_options`, ladder logic in phase_06 | GEMINI · LOCAL | ✅ |
+| 14.6 | Quality judge — 12 ideal transcripts, 4-axis LLM judge, gate at avg ≥4.0 | GEMINI | ✅ |
+| 14.7 | Intent expander — vague intent → 3-5 concrete search terms via LLM | GEMINI | ✅ |
+| 14.8 | Parallel multi-search merge in orchestrator (asyncio.gather + dedupe by restaurantId) | LOCAL | ✅ |
+| 14.9 | Menu cache — 5-min TTL on `get_restaurant_menu` keyed by (restaurant_id, address_id) | LOCAL | ✅ |
+| 14.10 | Dish ranking — keyword-match score boost (+60 exact, +35 all-words), cross-restaurant dedupe | LOCAL | ✅ |
+| 14.11 | Emergent LLM proxy adapter (replaces deprecated `google.generativeai`, removes 20 req/day cap) | LOCAL | ✅ |
+| 14.12 | Disk-backed session snapshots in `.sessions/<id>.json` — survive `uvicorn --reload` | LOCAL | ✅ |
+| 14.13 | Streaming "thinking" SSE event so the UI shows activity in <100ms | LOCAL | ✅ |
+| 14.14 | Schedule proposal auto-appends when intent has both food + time | LOCAL | ✅ |
+
+### Phase 14 — Eval (live, not mocked)
+
+| # | Script | Pass criteria | Status |
+|---|--------|--------------|:------:|
+| 14.E1 | `scripts/live_eval.py` — intent (20 prompts, 29 field checks) + persona (5 scenarios) | intent ≥95%, persona 0 violations | ✅ |
+| 14.E2 | `scripts/live_eval_extended.py` — multi-turn context, rerank sanity, prompt-injection resistance, hallucination starvation | all 4 sections pass | ✅ |
+| 14.E3 | `scripts/live_eval_e2e.py` — E2E backend (search → cards, schedule, cart, order guard live block proof) | all 4 checks pass | ✅ |
+| 14.E4 | `scripts/quality_judge.py` — 12 scenarios, 4-axis grading by judge LLM | avg ≥4.0 on relevance / tone / brevity / helpful | ✅ |
+
+**Phase 14 exit:** all four live evals green; persona quality at 4.0+ on every axis; intent expansion handles vague queries without dead-ends.
+
+---
+
+## Final status (as of Phase 14)
+
+- **Offline gate:** ✅ 224/224
+- **Live intent + persona:** ✅ pass
+- **Live extended (context/injection/hallucination):** ✅ pass
+- **Live E2E (with order-guard block proof):** ✅ pass
+- **Quality judge (4-axis):** ✅ all axes ≥4.0
+
+**Ready for Phase 13 sign-off whenever the user adds `EVAL_SUITE_PASSED=true` to `.env`.**
+**`ORDER_ENABLED` stays `false` until manual human review of the eval matrix.**

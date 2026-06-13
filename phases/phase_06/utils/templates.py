@@ -3,15 +3,22 @@
 from typing import Any
 
 
-def get_cart_template(cart_data: dict[str, Any]) -> list[dict[str, Any]]:
+def get_cart_template() -> list[dict[str, Any]]:
     """Return a static bubble array for a cart action."""
-    # Assuming cart_data contains 'total' or similar. 
-    # For now, we return a simple static message to avoid Gemini overhead.
-    total = cart_data.get("cart_total", "the current total")
     return [
         {
-            "text": f"Added to cart! Current total is ₹{total}.",
-            "quick_replies": ["Checkout", "Add more from this place", "Start over"]
+            "text": "Added! ✓",
+            "quick_replies": ["More from here", "Checkout", "Start over"]
+        }
+    ]
+
+
+def get_in_restaurant_template() -> list[dict[str, Any]]:
+    """Fallback when restaurant menu is empty or unavailable."""
+    return [
+        {
+            "text": "Couldn't load the full menu right now — try searching for something specific!",
+            "quick_replies": ["Search again", "Different restaurant"]
         }
     ]
 

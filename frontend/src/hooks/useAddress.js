@@ -5,7 +5,7 @@ import { useState, useCallback, useRef } from "react";
  *
  * Usage:
  *   const addr = useAddress(chat.sessionId);
- *   <AddressPill address={addr.selected} onClick={addr.open} />
+ *   <button onClick={addr.open}>{addr.selected?.chip || "Select Address"}</button>
  *   <AddressSheet {...addr} />
  */
 export function useAddress(sessionId) {

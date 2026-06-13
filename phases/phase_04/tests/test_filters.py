@@ -62,8 +62,9 @@ def test_missing_status_killed():
 
 # ── Gate 2: Rating ─────────────────────────────────────────────────────────────
 
-def test_rating_below_4_killed():
-    r = _restaurant(rating=3.9)
+def test_rating_below_threshold_killed():
+    # Threshold is 3.5 — below that gets killed; 3.9 passes.
+    r = _restaurant(rating=3.4)
     assert apply_filters([r], _intent()) == []
 
 
@@ -199,7 +200,7 @@ def test_empty_input_returns_empty():
 def test_multiple_restaurants_partial_filter():
     open_r = _restaurant(status="OPEN", rating=4.5)
     closed_r = _restaurant(status="CLOSED", rating=4.5)
-    low_r = _restaurant(status="OPEN", rating=3.5)
+    low_r = _restaurant(status="OPEN", rating=3.0)  # below 3.5 threshold
     result = apply_filters([open_r, closed_r, low_r], _intent())
     assert len(result) == 1
     assert result[0] is open_r

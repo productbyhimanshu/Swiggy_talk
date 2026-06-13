@@ -15,7 +15,7 @@ import DesktopCart from "../Cart/DesktopCart";
 
 export default function DesktopShell({ shape = "rounded", layout = "carousel", density = "default" }) {
   const chat      = useChat();
-  const cartState = useCart();
+  const cartState = useCart(chat.sessionId);
   const addr      = useAddress(chat.sessionId);
   const [input, setInput] = useState("");
   const streamRef = useRef();
@@ -37,7 +37,18 @@ export default function DesktopShell({ shape = "rounded", layout = "carousel", d
 
   function handleAdd(dish) {
     const added = cartState.addToCart(dish);
-    if (added) chat.sendMessage(`add ${dish.name.toLowerCase()}`);
+    if (added) {
+      fetch("/api/set-restaurant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: chat.sessionId,
+          restaurant_id: dish.restaurantId || dish.id,
+          restaurant_name: dish.restaurant || dish.name,
+        }),
+      }).catch(() => {});
+      chat.sendMessage(`add ${dish.name.toLowerCase()}`);
+    }
   }
 
   function handleResuggest() {

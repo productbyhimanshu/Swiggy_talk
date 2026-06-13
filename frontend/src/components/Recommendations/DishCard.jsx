@@ -6,19 +6,27 @@ export default function DishCard({ dish, qty, lockedRestaurant, onAdd, onInc, on
   // eta may be int (minutes) or string like "25 min" — normalise to just the number
   const etaRaw = dish.eta ?? dish.deliveryTime ?? "—";
   const eta = typeof etaRaw === "number" ? etaRaw : String(etaRaw).replace(/\s*min.*/, "").trim();
-  // subtitle: cuisines for restaurant cards, or restaurant name for dish cards
-  const subtitle = dish.cuisines || dish.restaurant || "";
+  // Dish cards (have itemId) lead with the restaurant name so the user knows
+  // where it comes from; restaurant cards just show cuisines.
+  const isDish = Boolean(dish.itemId);
+  const subtitle = isDish
+    ? `from ${dish.restaurant || "—"}`
+    : (dish.cuisines || dish.restaurant || "");
 
   return (
     <div className={"dish-card" + (switches ? " switches" : "")}>
       <div className="img">
         <div className="stripe" />
-        <div className="placeholder">{dish.placeholder || dish.name}</div>
+        {dish.imageUrl ? (
+          <img className="dish-img" src={dish.imageUrl} alt={dish.name} loading="lazy" />
+        ) : (
+          <div className="cuisine-emoji" aria-hidden="true">{dish.placeholder || "🍽️"}</div>
+        )}
         {dish.why && <div className="why">{dish.why}</div>}
         <div className="rating-pill">
-          <Star /> {dish.rating ?? "—"}
+          <Star /> {dish.rating ?? "new"}
         </div>
-        {sameRest && qty === 0 && <div className="card-flag in-basket">in your basket</div>}
+        {sameRest && qty === 0 && <div className="card-flag in-basket">same restaurant</div>}
         {switches && <div className="card-flag switches-cart">switches basket</div>}
       </div>
       <div className="body">

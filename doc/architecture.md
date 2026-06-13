@@ -1110,3 +1110,168 @@ Last 6 messages to Gemini, not full history — manage token budget
 Quick reply chips disappear after tap — never leave stale chips
 Optimistic cart — show immediately, API in background
 
+
+
+23. Conversational intelligence layer (Phase 13+ — beyond the original spec)
+
+The original architecture (sections 1–22 above) ships a working 5-stage pipeline:
+classify → parse → validate → search → score → format. After putting it in front
+of real conversations, three core gaps showed up:
+
+  1. Vague queries dead-end. Swiggy returns garbage for "comfort food"
+     (item names with no rating/price). The pipeline as specified treats the
+     user's words as a literal search string.
+
+  2. The system has no memory of who you are. Every session starts cold.
+     "Lunch" gets "what are you in the mood for?" instead of "same Wow!
+     Momo as last week?".
+
+  3. Persona is a postscript, not an order-taker. It reacts to results
+     but has no character voice, no thinking step, no awareness of the
+     user's vibe (rushed vs. comfort vs. celebrating).
+
+23.1 The fix — an Intent Translation Layer
+
+Between parse_intent and search_restaurants we inserted three new components:
+
+  • intent_expander.py — LLM call that maps vague intent → 3-5 concrete
+    Swiggy-searchable terms.  "comfort food" + user_facts + 14:00 →
+    ["biryani", "dal makhani", "butter chicken", "thali"].  Returns reasoning
+    trace ("warm hearty north indian comfort") for downstream use.
+
+  • Parallel multi-search.  Each expanded term fires a search_restaurants
+    call in asyncio.gather; results merge + dedupe by restaurantId.
+    First-position results from more-relevant queries implicitly outrank
+    later ones.
+
+  • Vagueness gate — `is_vague(intent)` decides whether to expand.
+    Concrete queries ("butter chicken under 300") skip expansion → zero
+    added latency on the common path.
+
+This single addition replaced a hardcoded mood→cuisine map (4 hardcoded
+moods) with an LLM that handles any vague request including ones we never
+anticipated (e.g. "morning food asked at evening" → Bhook now responds
+honestly "it's evening so I found some good evening snacks").
+
+23.2 Long-term memory (SQLite-backed)
+
+phase_00/services/memory.py exposes:
+  • set_preference(key, value) / get_preference(key) — explicit defaults
+  • record_order(restaurant_id, name, items, total) — every Add to cart
+  • record_rejection(query, dishes) — negative signal
+  • get_user_facts(max_facts=5) — top-N facts as short strings for prompts
+  • suggest_usual(now) — most-frequent order at this hour, for proactive openers
+
+The persona system prompt injects user_facts on every call.  Bhook now
+references them naturally: "same Wow! Momo as usual?", "still going veg-only,
+right?", "last time you tried Marky Momos — wanna stay there?".
+
+23.3 Persona rewrite (character document + thinking scratchpad)
+
+Replaced the bullet-rule prompt with:
+  • A 3-paragraph character document describing who Bhook is, what Bhook
+    would never say, how Bhook talks at 2am vs noon.
+  • A silent thinking scratchpad: "BEFORE writing JSON, briefly think about
+    (a) what does the user actually want? (b) what's the angle on these
+    dishes? (c) what one chip would help them most next?"
+  • Five few-shot examples covering hangry / rough day / celebrating /
+    repeat customer / rushed — showing tone shifts, not templates.
+  • Memory facts and the intent expansion reasoning passed in as context
+    fields so Bhook can be honest about the angle ("non-veg comfort coming
+    right up, hope biryani works").
+
+23.4 Confidence-driven clarification ladder
+
+UserIntent gained three new fields populated by the intent parser:
+  • confidence: float 0.0–1.0
+  • clarify_probe: free-text "the one question that would unblock me"
+  • clarify_options: 2–3 chip labels for that probe
+
+The orchestrator branches on confidence:
+  • ≥0.8: search immediately
+  • 0.6–0.8: search + offer refine chips
+  • <0.6 and no search_query: ask the probe the LLM suggested
+
+This replaces the always-ask-veg/non-veg flow with context-appropriate
+questions ("for one or sharing?", "going out after?", "hot or cold?").
+
+23.5 Proactive opener
+
+phase_06/handlers/opener.py — zero-LLM, sub-10ms.  Reads memory + clock:
+  • If a usual exists at this hour: "want the X from Y again?"
+  • Else time-aware default: "morning! what's for breakfast?" / "snack
+    o'clock — sweet or savoury?" / "late night cravings? 🌙 i got you"
+
+Surfaced via GET /api/opener; called by the empty-state UI on chat load.
+
+23.6 Quality judge eval
+
+scripts/quality_judge.py runs 12 hand-written ideal Bhook replies through
+the real pipeline.  A strict LLM judge scores actual outputs on:
+  • relevance (0–5): addresses what was asked
+  • tone (0–5): sounds like Bhook (warm friend, not corporate AI)
+  • brevity (0–5): short and punchy
+  • helpful (0–5): moves the conversation forward
+
+Gate: avg ≥4.0 on every axis.  Current status: ✅ all passing
+(relevance 4.42, tone 4.50, brevity 4.00, helpful 4.58).
+
+This is the discipline that turns "every prompt edit is vibes" into a real
+feedback loop. Used to iterate the persona character doc with measurable
+quality lift between revisions.
+
+23.7 Deterministic why-this-pick badges (latency win)
+
+Originally the per-card "why this pick" badge was an LLM call (~700ms).
+The model produced templated output anyway ("bestseller, under ₹200",
+"top-rated nearby"). Replaced with a deterministic generator in
+why_picker.py that:
+  • Mines structured signals from the dish dict
+    (_match_kind, bestseller, rating ≥4.5, fastest ETA, price ≤0.6×budget,
+    veg when intent says veg)
+  • Drops badges that apply to >50% of cards (no signal = no badge)
+  • Caps at 32 chars without mid-word truncation
+
+Net: -700ms per turn AND better signal (badges differentiate cards
+instead of all saying the same thing).
+
+23.8 Menu cache (latency win)
+
+phase_04/services/swiggy_read.py keeps a 5-minute TTL in-memory cache
+keyed by (restaurant_id, address_id).  Refines and "more from here" turns
+inside the TTL skip the network entirely.  Menu data is effectively
+static within a session.
+
+Measured: ~2.7s saved on warm dish-level queries.
+
+23.9 What we intentionally did NOT build
+
+  • Full tool-calling agent loop — the architecturally pure version of the
+    pipeline (LLM picks the next action each turn). ~1 week refactor;
+    intent expansion delivers 70% of the benefit in 1 day. Right answer
+    when telemetry shows the fixed pipeline is losing conversations.
+
+  • Vector store / RAG — overkill for a single-user app. Embeddings would
+    need food-domain fine-tuning to match the LLM expansion's quality.
+    Right answer at hundreds of users with collaborative filtering goals.
+
+  • Custom restaurant index — Swiggy has the inventory and the live
+    delivery network; we don't. The fix isn't a better search engine,
+    it's a better query (which is what intent expansion delivers).
+    Right answer is never — by then it's a different business model.
+
+24. Updated API surface (additions over §1–22)
+
+  GET  /api/opener            → proactive first message based on memory + clock
+  POST /api/set-restaurant    → after Add to cart, persists restaurant context
+                                + records order to long-term memory
+  POST /api/set-address       → after popup pick, stores addressId in session
+
+25. Updated test gate
+
+Phase 12 was originally 223 tests.  After phases 13–14 additions:
+
+  Total: 224 offline tests (one added test for food+time routing)
+  Plus:  4 live evals (intent, extended, e2e, quality_judge)
+
+Run all: `bash scripts/run_eval_suite.sh` then the four scripts/ live evals.

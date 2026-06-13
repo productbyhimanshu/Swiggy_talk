@@ -30,7 +30,12 @@ def _state(**kwargs) -> ConversationState:
         ("add paneer to cart", Route.CART_ACTION),
         ("remove the biryani", Route.CART_ACTION),
         ("increase quantity", Route.CART_ACTION),
-        ("lunch at 1 PM", Route.SCHEDULE),
+        # "lunch" is a food hint — combined with "at 1 PM" the user wants
+        # food + schedule, handled as NEW_SEARCH with a schedule proposal
+        # appended after results. Pure schedule chips like "schedule" or
+        # "deliver by 8" still route to SCHEDULE (covered by other cases).
+        ("lunch at 1 PM", Route.NEW_SEARCH),
+        ("schedule", Route.SCHEDULE),
         ("deliver by 8", Route.SCHEDULE),
         ("biryani", Route.NEW_SEARCH),
         ("ok", Route.GREETING),

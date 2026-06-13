@@ -39,7 +39,7 @@ echo ""
   "$ROOT/phases/phase_10/tests" \
   "$ROOT/phases/phase_11/tests" \
   "$ROOT/phases/phase_12/tests" \
-  --tb=short "${@}"
+  --tb=short ${1:+"$@"}
 
 EXIT=$?
 

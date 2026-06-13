@@ -23,8 +23,10 @@ class ConversationState(BaseModel):
     # ── Address resolution (architecture: 100% from get_addresses, never GPS) ──
     address_id: str | None = None          # selected Swiggy addressId
     addresses: list[dict] = Field(default_factory=list)  # cached from get_addresses
-    awaiting_address_pick: bool = False    # True while address picker chips are shown
-    pending_search_query: str | None = None  # original query stored while waiting for address pick
+    # Set by orchestrator when filters had to relax. Lets the persona be honest
+    # about why results may not perfectly match the request.
+    # Values: "match" | "over_budget" | "wrong_diet" | "fallback" | None
+    search_relaxation: str | None = None
 
     def get_context_window(self) -> list[dict]:
         return self.message_history[-6:]

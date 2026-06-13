@@ -21,12 +21,23 @@ from phases.phase_00.config import Settings, get_settings
 from phases.phase_00.logging_setup import get_logger
 from phases.phase_00.services.swiggy_api import SwiggyApiClient, SwiggyApiError
 from phases.phase_00.services.swiggy_auth import SwiggyAuthService
-from phases.phase_04.utils.parse_swiggy_content import parse_addresses, parse_restaurants
+from phases.phase_04.utils.parse_swiggy_content import parse_addresses, parse_menu, parse_restaurants
 
 log = get_logger(__name__)
 
 _RETRY_COUNT = 3
 _RETRY_BACKOFF = (1.0, 2.0, 4.0)  # seconds between retries
+
+# Menu cache — process-local. (restaurant_id, address_id) → (cached_at, menu_dict)
+# 5-minute TTL is conservative; Swiggy menus rarely change mid-session and
+# this cuts ~1.5s off every refine / "more from here" / dish-level follow-up.
+_MENU_CACHE_TTL = 300.0  # seconds
+_menu_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
+def clear_menu_cache() -> None:
+    """Test helper — drop all cached menus."""
+    _menu_cache.clear()
 
 
 class SwiggyUnavailableError(Exception):
@@ -116,15 +127,37 @@ class SwiggyReadClient:
             return result.get("restaurants", [])
         return []
 
-    async def get_restaurant_menu(self, restaurant_id: str) -> dict:
-        """Full menu for a restaurant — items include isVeg, price, name."""
-        result = await self._call(
-            "get_restaurant_menu",
-            {"restaurantId": restaurant_id},
-        )
-        if isinstance(result, dict):
-            return result
-        return {"items": []}
+    async def get_restaurant_menu(self, restaurant_id: str, address_id: str | None = None) -> dict:
+        """Full menu for a restaurant — items include isVeg, price, name, image.
+
+        Swiggy's MCP requires addressId here too; without it the call returns
+        "addressId is required" as a text error.
+
+        Cached for _MENU_CACHE_TTL seconds per (restaurant_id, address_id) —
+        refines and "more from here" turns inside the TTL skip the network
+        entirely. Menu data is effectively static within a session.
+        """
+        cache_key = (restaurant_id, address_id or "")
+        now = asyncio.get_event_loop().time()
+        cached = _menu_cache.get(cache_key)
+        if cached and (now - cached[0]) < _MENU_CACHE_TTL:
+            return cached[1]
+
+        args: dict[str, Any] = {"restaurantId": restaurant_id}
+        if address_id:
+            args["addressId"] = address_id
+        result = await self._call("get_restaurant_menu", args)
+        if isinstance(result, list):
+            parsed = parse_menu(result)
+        elif isinstance(result, dict):
+            parsed = result
+        else:
+            parsed = {"items": []}
+
+        # Don't cache empty/error results — let the next call retry.
+        if parsed.get("items"):
+            _menu_cache[cache_key] = (now, parsed)
+        return parsed
 
     async def search_menu(
         self,

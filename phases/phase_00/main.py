@@ -151,19 +151,11 @@ async def swiggy_callback(
 async def auth_status():
     """Check whether a valid Swiggy token is stored."""
     auth = SwiggyAuthService()
-    bundle = auth.load_tokens()
-    if bundle is None:
-        return {"authenticated": False, "login_url": "/auth/swiggy/login"}
+    token = auth.get_access_token()  # None when missing or expiring within 5 min
+    expiry = auth.settings.swiggy_token_expiry
+    hours_left = max(0.0, round((expiry - time.time()) / 3600, 1)) if expiry else 0.0
     return {
-        "authenticated": not bundle.is_expired(),
-        "expires_at": bundle.expires_at,
-        "scope": bundle.scope,
+        "authenticated": token is not None,
+        "expires_in_hours": hours_left,
         "login_url": "/auth/swiggy/login",
     }
-
-
-@app.post("/auth/logout")
-async def auth_logout():
-    """Clear stored tokens."""
-    SwiggyAuthService().clear_tokens()
-    return {"ok": True}

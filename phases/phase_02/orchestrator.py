@@ -18,11 +18,21 @@ PATTERN_ORDER: list[tuple[str, str]] = [
     ("cart_action", r"\b(add|remove|delete|drop|take out|minus|plus|increase|decrease|qty|quantity)\b"),
     (
         "refine",
-        r"\b(faster|cheaper|healthier|more protein|less spicy|different|instead|re-?suggest|better options|something else|show me)\b",
+        # Refinement chips and natural phrases that modify the existing search:
+        # speed/price/health/diet/cuisine swap. Important: "pure veg only",
+        # "non-veg only", "fastest delivery" must NOT route to NEW_SEARCH
+        # because that drops the original query keyword (momos/biryani/etc).
+        r"\b("
+        r"faster|fastest|cheaper|healthier|more protein|less spicy|spicier|milder|"
+        r"different|instead|re-?suggest|better options|something else|show me|"
+        r"pure veg|veg only|veg-only|nonveg only|non-?veg only|"
+        r"under \d+|below \d+|less than \d+|"
+        r"fast delivery|quick delivery|highest rated|top rated|cheapest"
+        r")\b",
     ),
     (
         "in_restaurant",
-        r"\b(same restaurant|same place|also add from|search .+ in|from same|from there|what else)\b",
+        r"\b(same restaurant|same place|also add from|search .+ in|from same|from there|from here|more from|what else)\b",
     ),
     (
         "schedule",
@@ -52,9 +62,25 @@ def _passes_context_guard(route: Route, state: ConversationState) -> bool:
         return False
     if route == Route.REFINE and not state.has_recommendations:
         return False
-    if route == Route.IN_RESTAURANT and not state.current_restaurant_id:
+    if route == Route.IN_RESTAURANT and not (state.current_restaurant_id or state.cart_restaurant_id or state.cart_has_items):
         return False
     return True
+
+
+# Common food / cuisine keywords — when one of these appears in the message
+# alongside a refine/schedule trigger, prefer NEW_SEARCH so the food query
+# isn't lost (e.g. "butter chicken under 300" must not route to REFINE if the
+# prior recommendation was for momos; "lunch momos at 1pm" must run a real
+# search before offering to schedule).
+_FOOD_HINT_RE = re.compile(
+    r"\b(pizza|momo|momos|biryani|burger|burgers|dosa|idli|vada|paneer|chicken|"
+    r"noodle|noodles|sandwich|pasta|sushi|cake|donut|kebab|thali|roll|rolls|wrap|"
+    r"samosa|tikka|shawarma|falafel|taco|chowmein|manchurian|fried rice|naan|"
+    r"roti|paratha|chaap|bhel|pani puri|dahi puri|ice cream|shake|lassi|coffee|"
+    r"tea|waffle|pancake|salad|soup|food|meal|dinner|lunch|breakfast|brunch|"
+    r"butter chicken|fish|prawn|mutton|veg|nonveg|non-veg|cuisine|spicy|sweet)\b",
+    re.IGNORECASE,
+)
 
 
 def classify_regex(message: str, state: ConversationState) -> Route | None:
@@ -63,9 +89,17 @@ def classify_regex(message: str, state: ConversationState) -> Route | None:
     if not msg:
         return None
 
+    has_food = bool(_FOOD_HINT_RE.search(msg))
+
     for name, pattern in PATTERN_ORDER:
         if re.search(pattern, msg, re.IGNORECASE):
             route = _ROUTE_BY_NAME[name]
+            # If the message names a dish/cuisine/meal, REFINE and SCHEDULE
+            # are too narrow — the user wants a fresh food search that may
+            # *also* be timed. NEW_SEARCH then attaches a schedule proposal
+            # at the end when intent.timing is present.
+            if has_food and route in (Route.REFINE, Route.SCHEDULE):
+                return Route.NEW_SEARCH
             if _passes_context_guard(route, state):
                 return route
     return None

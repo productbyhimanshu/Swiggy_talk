@@ -12,13 +12,14 @@ def test_cart_template_zero_gemini_calls():
     """6.E4 test_templates.py — cart/cancel/stale return zero Gemini calls."""
     # Since these are static functions, they inherently don't accept a gemini_client.
     # We verify the schema returned is correct JSON array format.
-    bubbles = get_cart_template({"cart_total": 450})
-    
+    bubbles = get_cart_template()
+
     assert isinstance(bubbles, list)
     assert len(bubbles) == 1
     assert "text" in bubbles[0]
     assert "quick_replies" in bubbles[0]
-    assert "450" in bubbles[0]["text"]
+    # No fake total in template — cart total is frontend state
+    assert "Added" in bubbles[0]["text"]
 
 
 def test_cancel_template_schema():

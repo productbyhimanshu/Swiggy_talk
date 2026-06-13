@@ -94,13 +94,12 @@ async def test_persona_failure_fallback(sample_top_6):
 
     bubbles = await format_recommendations(intent, sample_top_6, [], client)
 
-    # Fallback generates 1 intro bubble, 2 item bubbles, 1 outro bubble
-    assert len(bubbles) == 4
-
-    # Check name and price appear in fallback bubbles (restaurant → cuisines field not present in fixture)
-    assert "Spicy Paneer Tikka" in bubbles[1]["text"]
-    assert "250" in bubbles[1]["text"]
-
-    assert "Chicken Biryani" in bubbles[2]["text"]
-    assert "400" in bubbles[2]["text"]
+    # Fallback is one short intro bubble — restaurant data shown via cards event,
+    # never duplicated in text (no-listing rule)
+    assert len(bubbles) == 1
+    assert "text" in bubbles[0]
+    assert bubbles[0]["quick_replies"]
+    # Must NOT list restaurant names in text
+    assert "Spicy Paneer Tikka" not in bubbles[0]["text"]
+    assert "Chicken Biryani" not in bubbles[0]["text"]
 
