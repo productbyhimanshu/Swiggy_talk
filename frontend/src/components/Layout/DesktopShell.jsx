@@ -12,12 +12,16 @@ import AddressSheet from "../Chat/AddressSheet";
 import SwitchSheet from "../Chat/SwitchSheet";
 import DishCardList from "../Recommendations/DishCardList";
 import DesktopCart from "../Cart/DesktopCart";
+import ReviewSheet from "../Cart/ReviewSheet";
+import OrderStatus from "../Cart/OrderStatus";
 
 export default function DesktopShell({ shape = "rounded", layout = "carousel", density = "default" }) {
   const chat      = useChat();
   const cartState = useCart(chat.sessionId);
   const addr      = useAddress(chat.sessionId);
-  const [input, setInput] = useState("");
+  const [input, setInput]       = useState("");
+  const [reviewOpen, setReview] = useState(false);
+  const [placed, setPlaced]     = useState(null);
   const streamRef = useRef();
 
   const isEmpty  = chat.messages.length === 0;
@@ -175,6 +179,26 @@ export default function DesktopShell({ shape = "rounded", layout = "carousel", d
         restaurant={cartState.cartRest}
         incCart={cartState.incCart}
         decCart={cartState.decCart}
+        onReview={() => setReview(true)}
+      />
+
+      <ReviewSheet
+        open={reviewOpen}
+        onClose={() => setReview(false)}
+        sessionId={chat.sessionId}
+        cart={cartState.cart}
+        restaurant={cartState.cartRest}
+        onPlaced={(data) => {
+          setPlaced(data);
+          setReview(false);
+          cartState.clearCart?.();
+        }}
+      />
+
+      <OrderStatus
+        open={!!placed}
+        onClose={() => setPlaced(null)}
+        placed={placed}
       />
 
       {/* Address picker popup — covers entire desktop shell */}

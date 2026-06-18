@@ -6,6 +6,7 @@ conversation history mid-session. Snapshots are loaded lazily on first miss.
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from phases.phase_01.models.intent import UserIntent
@@ -42,15 +43,45 @@ def _load_session(session_id: str) -> ConversationState | None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return ConversationState.model_validate(data)
+        state = ConversationState.model_validate(data)
+        # Reloading from disk = user came back. Drop cached search results
+        # (they're stale) and mark activity now so the staleness gate in
+        # phase_07/router.py doesn't dead-end the next user message into
+        # the "session timed out" bubble.
+        state.cached_results = []
+        state.has_recommendations = False
+        state.last_activity = datetime.now()
+        return state
     except Exception:
         return None
+
+
+def _last_used_address_id() -> str | None:
+    """Find the most recently saved address_id across all session snapshots."""
+    try:
+        snapshots = sorted(_SESSIONS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for snap in snapshots[:10]:
+            try:
+                data = json.loads(snap.read_text(encoding="utf-8"))
+                addr = data.get("address_id")
+                if addr:
+                    return addr
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 def get_session(session_id: str) -> ConversationState:
     """Retrieve or create a conversation state (memory → disk → new)."""
     if session_id not in _sessions:
-        state = _load_session(session_id) or ConversationState(session_id=session_id)
+        state = _load_session(session_id)
+        if state is None:
+            state = ConversationState(session_id=session_id)
+            # Seed address from the most recent session so users don't have to
+            # re-select their address after every server restart / page refresh.
+            state.address_id = _last_used_address_id()
         _sessions[session_id] = state
     return _sessions[session_id]
 

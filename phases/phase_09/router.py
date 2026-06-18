@@ -53,9 +53,13 @@ async def add_to_cart(req: CartRequest):
             address_id=state.address_id
         )
         
-        # Check budget again after API (if total > 1000, we should ideally rollback, but Swiggy API doesn't know our limit)
-        # Assuming the Swiggy API returns the new cart total:
-        total = res.get("cart", {}).get("total", 0)
+        # Check budget again after API. Swiggy `update_food_cart` sometimes
+        # returns a list (content envelope) rather than a dict — in that case
+        # we skip the post-hoc total check and rely on the pre-call guard above.
+        total = 0
+        if isinstance(res, dict):
+            cart = res.get("cart") if isinstance(res.get("cart"), dict) else {}
+            total = cart.get("total", 0) or res.get("total", 0) or 0
         if total > 1000:
             log.warning("cart_budget_exceeded_after_api", total=total)
             await client.update_food_cart(
@@ -87,7 +91,10 @@ async def remove_from_cart(req: CartRequest):
             address_id=state.address_id
         )
         
-        cart_total = res.get("cart", {}).get("total", 0)
+        cart_total = 0
+        if isinstance(res, dict):
+            cart = res.get("cart") if isinstance(res.get("cart"), dict) else {}
+            cart_total = cart.get("total", 0) or res.get("total", 0) or 0
         if cart_total <= 0:
             state.cart_has_items = False
             state.cart_restaurant_id = None

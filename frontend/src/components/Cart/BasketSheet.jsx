@@ -1,6 +1,6 @@
 import { Close } from "../../icons/index.jsx";
 
-export default function BasketSheet({ open, onClose, cart, restaurant, incCart, decCart }) {
+export default function BasketSheet({ open, onClose, cart, restaurant, incCart, decCart, onReview }) {
   if (!open) return null;
   const items = Object.values(cart);
   const subtotal = items.reduce((s, it) => s + it.dish.price * it.qty, 0);
@@ -57,7 +57,11 @@ export default function BasketSheet({ open, onClose, cart, restaurant, incCart, 
             </div>
             <div className="cta-row">
               <button className="ghost" onClick={onClose}>Edit in chat</button>
-              <button className="primary" disabled={over}>Review &amp; order →</button>
+              <button
+                className="primary"
+                disabled={over}
+                onClick={() => { onClose?.(); onReview?.(); }}
+              >Review &amp; order →</button>
             </div>
           </>
         )}

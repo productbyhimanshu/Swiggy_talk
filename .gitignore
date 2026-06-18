@@ -31,6 +31,7 @@ npm-debug.log*
 # Application logs (JSON lines — inspect locally, never commit)
 logs/*.log
 logs/*.log.*
+logs/*.out
 !logs/.gitkeep
 !logs/README.md
 

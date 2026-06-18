@@ -13,6 +13,8 @@ import SwitchSheet from "./SwitchSheet";
 import DishCardList from "../Recommendations/DishCardList";
 import CartBar from "../Cart/CartBar";
 import BasketSheet from "../Cart/BasketSheet";
+import ReviewSheet from "../Cart/ReviewSheet";
+import OrderStatus from "../Cart/OrderStatus";
 
 export default function ChatPanel({ shape = "rounded", layout = "carousel", density = "default" }) {
   const chat      = useChat();
@@ -20,6 +22,8 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
   const addr      = useAddress(chat.sessionId);
   const [input, setInput]           = useState("");
   const [basketOpen, setBasketOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [placed, setPlaced]         = useState(null);
   const streamRef = useRef();
 
   const isEmpty   = chat.messages.length === 0;
@@ -140,6 +144,26 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
         restaurant={cartState.cartRest}
         incCart={cartState.incCart}
         decCart={cartState.decCart}
+        onReview={() => setReviewOpen(true)}
+      />
+
+      <ReviewSheet
+        open={reviewOpen}
+        onClose={() => setReviewOpen(false)}
+        sessionId={chat.sessionId}
+        cart={cartState.cart}
+        restaurant={cartState.cartRest}
+        onPlaced={(data) => {
+          setPlaced(data);
+          setReviewOpen(false);
+          cartState.clearCart?.();
+        }}
+      />
+
+      <OrderStatus
+        open={!!placed}
+        onClose={() => setPlaced(null)}
+        placed={placed}
       />
 
       {cartState.pendingSwitch && (

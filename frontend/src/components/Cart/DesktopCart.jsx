@@ -1,6 +1,6 @@
 import { Bag } from "../../icons/index.jsx";
 
-export default function DesktopCart({ cart, restaurant, incCart, decCart }) {
+export default function DesktopCart({ cart, restaurant, incCart, decCart, onReview }) {
   const items = Object.values(cart);
   const subtotal = items.reduce((s, it) => s + it.dish.price * it.qty, 0);
   const fee = items.length ? 28 : 0;
@@ -57,7 +57,11 @@ export default function DesktopCart({ cart, restaurant, incCart, decCart }) {
         <div className="line grand"><span>Total</span><span>₹{total}</span></div>
       </div>
       <div className="cta">
-        <button>Review &amp; order →</button>
+        <button
+          disabled={total > 1000}
+          onClick={onReview}
+          style={total > 1000 ? { opacity: 0.55 } : undefined}
+        >Review &amp; order →</button>
       </div>
     </div>
   );

@@ -150,8 +150,6 @@ async def route_message(
         # 3–5 concrete Swiggy-searchable terms, then run those in parallel.
         base_query = intent.search_query or "food"
         primary = base_query
-        if intent.veg_nonveg == "veg" and "veg" not in base_query.lower():
-            primary = f"veg {base_query}"
 
         expansion: ExpandedIntent | None = None
         search_terms: list[str] = [primary]
@@ -168,13 +166,13 @@ async def route_message(
                     intent, user_facts, _dt.now().hour, gemini_client,
                 )
                 state.search_relaxation = "expanded"
-                # Honour veg preference on the expanded terms too
+                # Use terms as-is — veg preference is applied post-search via
+                # _gate_diet and scoring. Prefixing "veg " onto Swiggy search
+                # terms returns 0 results because Swiggy treats "veg biryani"
+                # as a literal string, not a filtered category.
                 for term in expansion.search_terms:
-                    t = term
-                    if intent.veg_nonveg == "veg" and "veg" not in t.lower():
-                        t = f"veg {t}"
-                    if t not in search_terms:
-                        search_terms.append(t)
+                    if term not in search_terms:
+                        search_terms.append(term)
             except Exception as exc:
                 __import__("logging").getLogger(__name__).warning(
                     "expand_intent_skip: %s", exc,
