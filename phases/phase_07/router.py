@@ -76,6 +76,7 @@ async def set_address_endpoint(req: SetAddressRequest):
     """Store user-selected address in session (called by address popup)."""
     state = get_session(req.session_id)
     state.address_id = req.address_id
+    state.touch_activity()
     save_session(state)
     log.info("address_set_via_popup", session=req.session_id, address_id=req.address_id, label=req.label)
     return {"ok": True}
@@ -103,6 +104,7 @@ async def set_restaurant_endpoint(req: SetRestaurantRequest):
     state.current_restaurant_id = req.restaurant_id
     state.cart_restaurant_id = req.restaurant_id
     state.cart_has_items = True
+    state.touch_activity()
     save_session(state)
     # Memory: record this restaurant as a recent pick. We don't have item
     # detail at this endpoint yet (the frontend hits set-restaurant per Add),
@@ -206,6 +208,7 @@ async def stream_response(request: ChatRequest, client_request: Request):
     # ── 1. Staleness check ────────────────────────────────────────────────────
     if check_staleness(state):
         for bubble in get_stale_template():
+            bubble.setdefault("type", "bubble")
             yield f"data: {json.dumps(bubble)}\n\n"
         yield "data: [DONE]\n\n"
         return
