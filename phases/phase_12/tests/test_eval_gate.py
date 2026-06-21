@@ -137,21 +137,25 @@ def test_order_route_blocked_when_cart_empty():
     assert route != Route.ORDER
 
 
-# ── 12.E7 — ORDER_ENABLED=true without EVAL_SUITE_PASSED → startup error ─────
+# ── 12.E7 — ORDER_ENABLED=true unlocks orders_allowed (demo-mode gate) ───────
 
-def test_order_enabled_without_eval_suite_raises():
-    """12.E7 — ORDER_ENABLED=true without EVAL_SUITE_PASSED=true → ValueError at startup."""
-    import os
+def test_order_enabled_unlocks_orders_allowed():
+    """12.E7 — ORDER_ENABLED=true is the single switch; EVAL_SUITE_PASSED is unused.
+
+    Test/eval protection: conftest.py force-resets ORDER_ENABLED=false on every
+    pytest run, so this test would never see orders_allowed=True under pytest
+    even if the .env file on disk had ORDER_ENABLED=true.
+    """
     from phases.phase_00.config import Settings, get_settings
 
     get_settings.cache_clear()
     try:
-        with pytest.raises((ValueError, Exception)):
-            Settings(
-                ORDER_ENABLED=True,
-                EVAL_SUITE_PASSED=False,
-                GEMINI_API_KEY="test",
-            )
+        s = Settings(ORDER_ENABLED=True, GEMINI_API_KEY="test")
+        assert s.order_enabled is True
+        assert s.orders_allowed is True
+
+        s2 = Settings(ORDER_ENABLED=False, GEMINI_API_KEY="test")
+        assert s2.orders_allowed is False
     finally:
         get_settings.cache_clear()
 

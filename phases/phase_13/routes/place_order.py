@@ -1,7 +1,7 @@
 """Phase 13 — review summary + user-confirmed place_food_order (COD only).
 
 Order safety (architecture §5, §19):
-  • Real `place_food_order` is guarded by ORDER_ENABLED + EVAL_SUITE_PASSED.
+  • Real `place_food_order` is guarded by ORDER_ENABLED (set in .env).
     When either is false, the endpoint returns 403 with an explanation —
     the same shape the frontend can render as a friendly message.
   • Review endpoint re-validates the cart against Swiggy (single source of
@@ -226,8 +226,8 @@ async def order_review(req: ReviewRequest) -> dict[str, Any]:
     summary["orders_enabled"] = settings.orders_allowed
     if not settings.orders_allowed:
         summary["disabled_reason"] = (
-            "Orders are off in dev. Set ORDER_ENABLED=true and EVAL_SUITE_PASSED=true "
-            "in .env to enable real COD placement."
+            "Orders are off. Set ORDER_ENABLED=true in .env (demo mode) "
+            "to enable the Place Order CTA."
         )
     log.info(
         "order_review_built",

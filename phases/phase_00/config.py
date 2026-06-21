@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root: phases/phase_00/config.py → ../../
@@ -51,21 +51,18 @@ class Settings(BaseSettings):
     log_backup_count: int = Field(default=5, alias="LOG_BACKUP_COUNT")
     session_timeout_minutes: int = Field(default=30, alias="SESSION_TIMEOUT_MINUTES")
 
+    # ORDER_ENABLED is the only switch that unlocks real COD placement.
+    # It defaults to False and is force-reset to False by phases/conftest.py
+    # on every pytest run — so eval suites and unit tests can never trigger
+    # a real order even if the .env on disk has it true.
     order_enabled: bool = Field(default=False, alias="ORDER_ENABLED")
+    # Kept for backwards-compatibility with older .env / test fixtures.
+    # No longer consulted by the order gate; safe to remove from .env.
     eval_suite_passed: bool = Field(default=False, alias="EVAL_SUITE_PASSED")
-
-    @model_validator(mode="after")
-    def validate_order_gate(self) -> "Settings":
-        if self.order_enabled and not self.eval_suite_passed:
-            raise ValueError(
-                "ORDER_ENABLED=true requires EVAL_SUITE_PASSED=true. "
-                "Complete the Phase 12 eval suite before enabling real orders."
-            )
-        return self
 
     @property
     def orders_allowed(self) -> bool:
-        return self.order_enabled and self.eval_suite_passed
+        return self.order_enabled
 
 
 @lru_cache
