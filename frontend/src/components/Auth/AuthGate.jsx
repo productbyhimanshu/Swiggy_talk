@@ -1,23 +1,44 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "../../api/fetch";
 
-// Blocks the app until /auth/status says this cookie's user has a valid Swiggy
-// token. On a fresh visit the user sees ONE screen with ONE button linking to
-// /auth/swiggy/login; OAuth happens on Swiggy's own domain.
+// Every page load starts on this screen.
+//   • Not connected → "Continue with Swiggy" (OAuth happens on Swiggy's site).
+//   • Connected     → one-tap "Continue", or switch to another Swiggy account.
+// Returning from a fresh Swiggy login (?connected=1) skips straight to the app.
 export default function AuthGate({ children }) {
-  const [state, setState] = useState("checking"); // "checking" | "needs_login" | "ready"
+  const [state, setState] = useState("checking"); // checking | needs_login | start | ready
+  // Read once at first render: the effect below strips the flag from the URL,
+  // and StrictMode re-runs effects, so it must not re-read the URL.
+  const [justConnected] = useState(
+    () => new URLSearchParams(window.location.search).has("connected")
+  );
 
   useEffect(() => {
     let alive = true;
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("connected")) {
+      params.delete("connected");
+      const qs = params.toString();
+      window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : ""));
+    }
+
     apiFetch("/auth/status")
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
-        setState(d.authenticated ? "ready" : "needs_login");
+        if (!d.authenticated) setState("needs_login");
+        else setState(justConnected ? "ready" : "start");
       })
       .catch(() => alive && setState("needs_login"));
     return () => { alive = false; };
-  }, []);
+  }, [justConnected]);
+
+  async function switchAccount() {
+    try { await apiFetch("/auth/logout", { method: "POST" }); } catch {}
+    window.location.href = "/auth/swiggy/login";
+  }
+
+  if (state === "ready") return children;
 
   if (state === "checking") {
     return (
@@ -27,23 +48,27 @@ export default function AuthGate({ children }) {
     );
   }
 
-  if (state === "needs_login") {
-    return (
-      <div style={wrap}>
-        <div style={card}>
-          <div style={{ fontSize: 32, marginBottom: 4 }}>👋</div>
-          <h1 style={title}>bhook</h1>
-          <p style={sub}>talk yourself fed</p>
-          <a href="/auth/swiggy/login" style={cta}>
-            Continue with Swiggy
-          </a>
-          <p style={fine}>You'll sign in on Swiggy.</p>
-        </div>
+  return (
+    <div style={wrap}>
+      <div style={card}>
+        <div style={{ fontSize: 32, marginBottom: 4 }}>👋</div>
+        <h1 style={title}>bhook</h1>
+        <p style={sub}>talk yourself fed</p>
+        {state === "start" ? (
+          <>
+            <button style={cta} onClick={() => setState("ready")}>Continue</button>
+            <p style={fine}>Your Swiggy account is connected.</p>
+            <button style={link} onClick={switchAccount}>Use another Swiggy account</button>
+          </>
+        ) : (
+          <>
+            <a href="/auth/swiggy/login" style={cta}>Continue with Swiggy</a>
+            <p style={fine}>You'll sign in on Swiggy.</p>
+          </>
+        )}
       </div>
-    );
-  }
-
-  return children;
+    </div>
+  );
 }
 
 const wrap = {
@@ -68,10 +93,23 @@ const cta   = {
   display: "inline-block",
   background: "oklch(0.20 0.012 60)",
   color: "#fff",
+  border: "none",
   padding: "12px 24px",
   borderRadius: 999,
   fontWeight: 600,
   fontSize: 14,
+  fontFamily: "inherit",
   textDecoration: "none",
+  cursor: "pointer",
 };
 const fine  = { margin: "16px 0 0", color: "var(--mute, #8b8275)", fontSize: 12 };
+const link  = {
+  marginTop: 10,
+  background: "none",
+  border: "none",
+  color: "var(--mute, #8b8275)",
+  fontSize: 12,
+  fontFamily: "inherit",
+  textDecoration: "underline",
+  cursor: "pointer",
+};

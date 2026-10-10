@@ -164,9 +164,11 @@ async def swiggy_callback(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Land users back on the app. In dev the frontend is on :5173; in prod
-    # it's served from this host.
+    # it's served from this host. ?connected=1 tells the start screen to skip
+    # its "Continue" step right after a fresh login.
     settings = get_settings()
-    return RedirectResponse(settings.frontend_url or "/")
+    base = (settings.frontend_url or "").rstrip("/")
+    return RedirectResponse(f"{base}/?connected=1")
 
 
 @app.get("/auth/status")
