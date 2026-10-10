@@ -80,6 +80,20 @@ class SwiggyApiClient:
 
         return await self._invoke_tool(name, arguments or {})
 
+    async def call_tool_structured(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        """Like call_tool, but returns the tool's `structuredContent` JSON when present.
+
+        Swiggy sends every result twice: a human-readable text block (with
+        hints aimed at chat clients) and machine-readable `structuredContent`.
+        Prefer this for new code — it doesn't break when the text wording changes.
+        """
+        if name == ORDER_TOOL:
+            raise SwiggyApiError(
+                f"Direct call_tool_structured('{ORDER_TOOL}') is forbidden. "
+                "Use place_food_order() after order gate passes."
+            )
+        return await self._invoke_tool(name, arguments or {}, structured=True)
+
     async def place_food_order(
         self,
         payment_method: str = "COD",
@@ -96,7 +110,9 @@ class SwiggyApiClient:
         """Convenience wrapper for Phase 0 smoke test."""
         return await self.call_tool("get_addresses", {})
 
-    async def _invoke_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def _invoke_tool(
+        self, name: str, arguments: dict[str, Any], structured: bool = False
+    ) -> Any:
         token = self._require_token()
 
         payload = {
@@ -161,6 +177,8 @@ class SwiggyApiClient:
                     else str(error)
                 )
                 raise SwiggyApiError(f"Tool {name} failed: {msg}")
+            if structured and isinstance(result.get("structuredContent"), dict):
+                return result["structuredContent"]
             if "data" in result:
                 return result["data"]
             # Some responses nest content in result directly

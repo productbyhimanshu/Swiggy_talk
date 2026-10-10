@@ -20,7 +20,7 @@ from typing import Any
 from phases.phase_00.config import Settings, get_settings
 from phases.phase_00.logging_setup import get_logger
 from phases.phase_00.services.swiggy_api import SwiggyApiClient, SwiggyApiError
-from phases.phase_00.services.swiggy_auth import SwiggyAuthService
+from phases.phase_00.services.swiggy_auth import ReauthRequired, SwiggyAuthError, SwiggyAuthService
 from phases.phase_04.utils.parse_swiggy_content import parse_addresses, parse_menu, parse_restaurants
 
 log = get_logger(__name__)
@@ -162,21 +162,27 @@ class SwiggyReadClient:
     async def search_menu(
         self,
         query: str,
-        restaurant_id: str | None = None,
-        address_id: str | None = None,
-    ) -> list[dict]:
-        """Search items within / across restaurants."""
-        args: dict[str, Any] = {"query": query}
-        if restaurant_id:
-            args["restaurantId"] = restaurant_id
-        if address_id:
-            args["addressId"] = address_id
-        result = await self._call("search_menu", args)
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict):
-            return result.get("items", [])
-        return []
+        address_id: str,
+        veg_only: bool = False,
+        offset: int | None = None,
+    ) -> dict:
+        """Dish search across nearby restaurants — one call, Swiggy-ranked.
+
+        Returns {"items": [dish dicts], "has_more": bool, "next_offset": int|None}.
+        Dish dicts are card-ready: id, itemId, name, price, veg, restaurant,
+        restaurantId, imageUrl, dishRating, inStock.
+        """
+        args: dict[str, Any] = {"query": query, "addressId": address_id}
+        if veg_only:
+            args["vegFilter"] = 1
+        if offset:
+            args["offset"] = offset
+        result = await self._call("search_menu", args, structured=True)
+        raw = result.get("items", []) if isinstance(result, dict) else []
+        items = [d for d in (_dish_from_search_menu(r) for r in raw if isinstance(r, dict)) if d]
+        has_more = bool(result.get("hasMore")) if isinstance(result, dict) else False
+        next_offset = result.get("nextOffset") if isinstance(result, dict) else None
+        return {"items": items, "has_more": has_more, "next_offset": next_offset}
 
     async def get_food_cart(self) -> dict:
         """View current cart + bill breakdown."""
@@ -237,12 +243,17 @@ class SwiggyReadClient:
 
     # ── Retry core ─────────────────────────────────────────────────────────────
 
-    async def _call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+    async def _call(
+        self, tool_name: str, arguments: dict[str, Any], structured: bool = False
+    ) -> Any:
         """
         Call a Swiggy tool with 3× exponential backoff retry on 5xx / timeout.
 
         Test overrides are subject to the same retry logic — they can raise
         SwiggyApiError / ConnectionError to simulate transient failures.
+
+        Auth failures (ReauthRequired / SwiggyAuthError) are never retried —
+        they propagate so the API layer can answer 401 reauth_required.
 
         Raises:
             SwiggyUnavailableError: After all retries exhausted.
@@ -255,6 +266,8 @@ class SwiggyReadClient:
                 # Override path (test injection) — same retry semantics
                 if tool_name in self._tool_overrides:
                     result = await self._tool_overrides[tool_name](arguments)
+                elif structured:
+                    result = await self._api.call_tool_structured(tool_name, arguments)
                 else:
                     result = await self._api.call_tool(tool_name, arguments)
 
@@ -266,6 +279,9 @@ class SwiggyReadClient:
                     latency_ms=elapsed_ms,
                 )
                 return result
+
+            except (ReauthRequired, SwiggyAuthError):
+                raise
 
             except SwiggyApiError as exc:
                 last_error = exc
@@ -306,6 +322,38 @@ class SwiggyReadClient:
         raise SwiggyUnavailableError(
             f"Swiggy {tool_name} unavailable after {_RETRY_COUNT} attempts: {last_error}"
         ) from last_error
+
+
+# ── search_menu helpers ────────────────────────────────────────────────────────
+
+def _dish_from_search_menu(r: dict) -> dict | None:
+    """Map one search_menu structuredContent item to our dish-card shape."""
+    item_id = str(r.get("menu_item_id") or r.get("id") or "").strip()
+    if not item_id:
+        return None
+    if str(r.get("inStock", 1)) in ("0", "False", "false"):
+        return None
+    try:
+        price = int(float(r.get("price") or 0))
+    except (TypeError, ValueError):
+        price = 0
+    try:
+        dish_rating = float(r["rating"]) if r.get("rating") not in (None, "") else None
+    except (TypeError, ValueError):
+        dish_rating = None
+    return {
+        "id": item_id,
+        "itemId": item_id,
+        "name": str(r.get("name") or "").strip(),
+        "price": price,
+        "veg": bool(r.get("isVeg")),
+        "restaurant": str(r.get("restaurant_name") or "").strip(),
+        "restaurantId": str(r.get("restaurant_id") or "").strip(),
+        "imageUrl": r.get("imageUrl"),
+        "dishRating": dish_rating,
+        "hasAddons": bool(r.get("hasAddons")),
+        "bestseller": False,
+    }
 
 
 # ── Coupon helpers ─────────────────────────────────────────────────────────────

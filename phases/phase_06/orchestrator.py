@@ -2,8 +2,10 @@
 
 import asyncio
 import re
+from collections import Counter
 from typing import Any
 
+from phases.phase_00.services.swiggy_auth import ReauthRequired, SwiggyAuthError
 from phases.phase_01.models.intent import UserIntent
 from phases.phase_01.models.state import ConversationState
 from phases.phase_02.orchestrator import Route
@@ -178,16 +180,35 @@ async def route_message(
                     "expand_intent_skip: %s", exc,
                 )
 
-        weights = get_weights(intent)
+        # Dish-level search via Swiggy's search_menu (one call per term,
+        # Swiggy-ranked across all nearby restaurants). Dish queries search the
+        # cleaned phrase ("butter chicken"); vague requests search each
+        # expanded term ("dal makhani", "khichdi", …). Started now so it runs
+        # concurrently with the restaurant searches below.
+        dish_terms: list[str] = []
+        if state.address_id:
+            if _is_dish_query(intent):
+                phrase = _exact_phrase(intent.search_query or "")
+                dish_terms = [phrase] if phrase else []
+            elif expansion is not None and expansion.search_terms:
+                dish_terms = list(expansion.search_terms)
+        dish_task = (
+            asyncio.create_task(
+                _search_dishes(swiggy_client, dish_terms, intent, state.address_id)
+            )
+            if dish_terms else None
+        )
 
         # Parallel multi-search — every expanded term + the original. Merge,
-        # dedupe by restaurantId. First non-empty result keeps the user out
-        # of dead-ends even on weird queries.
+        # dedupe by restaurantId. Feeds restaurant-card fallback and gives
+        # dish cards their restaurant ETA / rating.
         async def _search_one(q: str) -> list[dict]:
             try:
                 return await swiggy_client.search_restaurants(
                     query=q, address_id=state.address_id,
                 )
+            except _AUTH_ERRORS:
+                raise
             except Exception:
                 return []
 
@@ -195,7 +216,13 @@ async def route_message(
             search_results = await asyncio.gather(
                 *(_search_one(q) for q in search_terms)
             )
+        except _AUTH_ERRORS:
+            if dish_task:
+                dish_task.cancel()
+            raise
         except Exception:
+            if dish_task:
+                dish_task.cancel()
             return get_swiggy_down_template()
 
         # Dedupe across the merged set by restaurantId. Earlier-position
@@ -209,38 +236,42 @@ async def route_message(
                     seen_ids.add(rid)
                     raw_restaurants.append(r)
 
+        _log = __import__("logging").getLogger(__name__)
+        _log.info(
+            "multi_search_result terms=%d results_per_term=%s raw=%d",
+            len(search_terms),
+            [len(b) for b in search_results],
+            len(raw_restaurants),
+        )
+
         # Hard gates (architecture §6): OPEN, rating ≥3.5, ETA, diet, budget.
         # If the gates are too aggressive (e.g. all nearby places rated <3.5),
         # relax to rating-sorted raw results rather than show nothing (§14).
         survivors = apply_filters(raw_restaurants, intent)
         if len(survivors) < 3 and raw_restaurants:
+            _log.info(
+                "survivors_relaxed strict=%d raw=%d — using raw sorted by rating",
+                len(survivors), len(raw_restaurants),
+            )
             survivors = sorted(
                 raw_restaurants,
                 key=lambda r: float(r.get("rating") or 0),
                 reverse=True,
             )
+        if not survivors:
+            _log.warning(
+                "search_empty query=%r terms=%s — all 6 Swiggy searches returned []",
+                primary, search_terms,
+            )
 
-        # Dish-level search for queries like "momos under 250" — fetch menus
-        # for top 3 restaurants (by rating) in parallel, extract matching items,
-        # return 6 actual dish cards with images. Architecture §1 promises "6
-        # high-accuracy recommendations" and dish cards match the user's
-        # mental model. Sort by rating first — Swiggy's raw order leads with
-        # ads/low-rated places we don't want at the top of menu fetches.
-        if _is_dish_query(intent) and survivors:
-            ranked = sorted(
-                survivors,
-                key=lambda r: float(r.get("rating") or 0),
-                reverse=True,
-            )
-            # Cast a wider net for dish-level search — many top-rated
-            # restaurants near a user don't actually serve the dish they're
-            # asking for (e.g. searching "momos" includes a dessert place
-            # and a biryani spot in the top 3). Pull menus from 6 candidates
-            # so we have a real shot at 6 distinct matching dishes after
-            # the keyword + diet + budget filters.
-            dishes = await _gather_dish_recommendations(
-                ranked[:6], intent, swiggy_client, state.address_id,
-            )
+        # Dish cards (architecture §1: "6 high-accuracy recommendations").
+        if dish_task is not None:
+            hits = await dish_task
+            rest_by_id = {
+                str(r.get("restaurantId") or r.get("id") or ""): r for r in raw_restaurants
+            }
+            dishes = _rank_dishes(hits, intent, rest_by_id, variety=len(dish_terms) > 1)
+            _log.info("dish_search terms=%s hits=%d picked=%d", dish_terms, len(hits), len(dishes))
             if dishes:
                 state.has_recommendations = True
                 # why-lines are now deterministic (no LLM hop) — annotate
@@ -368,124 +399,177 @@ async def route_message(
     return [{"text": "I'm still learning how to handle that! 😅", "quick_replies": []}]
 
 
-# ── Dish-level search ────────────────────────────────────────────────────────
+# ── Dish-level search (Swiggy search_menu) ───────────────────────────────────
 
-async def _gather_dish_recommendations(
-    top_restaurants: list[dict],
-    intent: UserIntent,
-    swiggy_client: SwiggyReadClient,
-    address_id: str | None,
-) -> list[dict]:
-    """
-    For a dish-style query ("momos under 250"):
-      1. Fetch menus of the top N restaurants in parallel.
-      2. Extract items whose name matches the query keyword.
-      3. Honour veg + budget intent.
-      4. Sort by (bestseller, restaurant rating, ascending price).
-      5. Return up to 6 dishes, each enriched with restaurant ETA so the
-         card can show delivery time even though menu items don't carry it.
+# Auth failures must reach the API layer (→ 401 reauth_required), never be
+# swallowed as "no results".
+_AUTH_ERRORS = (ReauthRequired, SwiggyAuthError)
 
-    Falls back to [] when no dishes match — caller may then show restaurants.
-    """
-    query_lc = (intent.search_query or "").lower().strip()
-    # The strict keyword the dish name MUST contain to be kept (a coarse filter
-    # — the exact_phrase below is what we use for ranking). "butter chicken
-    # under 300" → strict="chicken", exact="butter chicken".
-    primary_keyword = next(
-        (kw for kw in _DISH_KEYWORDS if kw in query_lc),
-        query_lc.split()[0] if query_lc else "",
-    )
-    # Strip refinement words so "butter chicken under 300" → "butter chicken"
-    _STOP = {"under", "below", "less", "than", "rs", "₹", "rupee", "rupees",
-             "for", "the", "a", "and", "with", "want", "give", "show", "me",
-             "i", "some", "any", "please"}
-    exact_phrase = " ".join(
-        w for w in re.findall(r"[a-z]+", query_lc)
-        if w not in _STOP and not w.isdigit()
+# Refinement words stripped from a dish query: "butter chicken under 300" → "butter chicken"
+_QUERY_STOP = {
+    "under", "below", "less", "than", "rs", "rupee", "rupees", "for", "the", "a",
+    "and", "with", "want", "give", "show", "me", "i", "some", "any", "please",
+}
+
+# Words too generic to identify a dish on their own when matching names.
+_GENERIC_DISH_WORDS = {
+    "veg", "non", "nonveg", "food", "special", "combo", "meal", "meals",
+    "with", "and", "the", "of", "style", "full", "half", "fresh", "plate",
+}
+
+_MAX_PER_RESTAURANT = 2
+_MAX_DISH_PAGES = 4
+
+
+def _exact_phrase(query: str) -> str:
+    return " ".join(
+        w for w in re.findall(r"[a-z]+", query.lower())
+        if w not in _QUERY_STOP
     ).strip()
 
-    async def fetch(r):
-        try:
-            return r, await swiggy_client.get_restaurant_menu(
-                str(r.get("restaurantId") or r.get("id", "")),
-                address_id=address_id,
-            )
-        except Exception:
-            return r, {"items": []}
 
-    results = await asyncio.gather(*(fetch(r) for r in top_restaurants))
+def _has_word(text: str, phrase: str) -> bool:
+    return re.search(rf"\b{re.escape(phrase)}\b", text) is not None
+
+
+def _keyword_match(name_lc: str, terms: list[str]) -> tuple[int, str | None]:
+    """Best match of a dish name against search terms.
+
+    3 = full phrase, 2 = all significant words, 1 = any significant word, 0 = none.
+    """
+    best, best_term = 0, None
+    for term in terms:
+        if _has_word(name_lc, term):
+            return 3, term
+        words = [w for w in term.split() if w not in _GENERIC_DISH_WORDS and len(w) >= 3]
+        if not words:
+            continue
+        if all(_has_word(name_lc, w) for w in words):
+            level = 2
+        elif any(len(w) >= 4 and _has_word(name_lc, w) for w in words):
+            level = 1
+        else:
+            continue
+        if level > best:
+            best, best_term = level, term
+    return best, best_term
+
+
+async def _search_dishes(
+    swiggy_client: SwiggyReadClient,
+    terms: list[str],
+    intent: UserIntent,
+    address_id: str,
+) -> list[tuple[str, dict]]:
+    """Run search_menu for every term in parallel → [(term, dish), ...].
+
+    A single-term (dish) query keeps paging until enough dishes survive the
+    budget/diet filters (a tight budget can push matches to later pages);
+    multi-term (vague) queries take one page each.
+    """
+    veg_only = intent.veg_nonveg == "veg"
+
+    def _passes(d: dict) -> bool:
+        if intent.veg_nonveg == "nonveg" and d.get("veg") is True:
+            return False
+        return not (intent.budget_max and d.get("price", 0) > intent.budget_max)
+
+    async def one(term: str) -> list[tuple[str, dict]]:
+        try:
+            page = await swiggy_client.search_menu(term, address_id, veg_only=veg_only)
+            items = list(page["items"])
+            pages = 1
+            while (
+                len(terms) == 1
+                and pages < _MAX_DISH_PAGES
+                and sum(_passes(d) for d in items) < 6
+                and page["has_more"]
+                and page["next_offset"]
+            ):
+                page = await swiggy_client.search_menu(
+                    term, address_id, veg_only=veg_only, offset=page["next_offset"],
+                )
+                items.extend(page["items"])
+                pages += 1
+            return [(term, d) for d in items]
+        except _AUTH_ERRORS:
+            raise
+        except Exception:
+            return []
+
+    batches = await asyncio.gather(*(one(t) for t in terms))
+    return [hit for batch in batches for hit in batch]
+
+
+def _rank_dishes(
+    hits: list[tuple[str, dict]],
+    intent: UserIntent,
+    rest_by_id: dict[str, dict],
+    variety: bool,
+) -> list[dict]:
+    """Filter, enrich, score and pick up to 6 dish cards.
+
+    variety=True (vague request, several terms): one dish per term first,
+    and the same dish name is shown once across restaurants.
+    variety=False (dish query): the same dish from different restaurants is
+    the point, so only exact duplicates within a restaurant are collapsed.
+    """
+    from phases.phase_04.utils.parse_eta import parse_eta as _parse_eta
 
     candidates: list[dict] = []
-    for restaurant, menu in results:
-        for item in menu.get("items", []):
-            name_lc = item.get("name", "").lower()
-            if primary_keyword and primary_keyword not in name_lc:
-                continue
-            # Diet check
-            if intent.veg_nonveg == "veg" and not item.get("veg", False):
-                continue
-            if intent.veg_nonveg == "nonveg" and item.get("veg") is True:
-                continue
-            # Budget check
-            if intent.budget_max and item.get("price", 0) > intent.budget_max:
-                continue
-            # Enrich with restaurant context the card needs
-            item = {
-                **item,
-                "eta":           restaurant.get("eta") or restaurant.get("deliveryTime"),
-                "deliveryTime":  restaurant.get("deliveryTime"),
-                "restaurant":    restaurant.get("name") or item.get("restaurant", ""),
-                "restaurantId":  str(restaurant.get("restaurantId") or restaurant.get("id", "")),
-                # Show the restaurant's rating on the dish card so the user sees
-                # which place this dish comes from at a glance.
-                "rating":        restaurant.get("rating"),
-                # Restaurant-level cuisines line is more readable than category
-                "cuisines":      restaurant.get("cuisines") or item.get("cuisines", ""),
-                "_restaurant_score": float(restaurant.get("rating") or 0),
-            }
-            candidates.append(item)
+    for term, dish in hits:
+        if intent.veg_nonveg == "veg" and not dish.get("veg"):
+            continue
+        if intent.veg_nonveg == "nonveg" and dish.get("veg") is True:
+            continue
+        if intent.budget_max and dish.get("price", 0) > intent.budget_max:
+            continue
+        rest = rest_by_id.get(dish.get("restaurantId", ""))
+        if rest is not None and rest.get("availabilityStatus", "OPEN") != "OPEN":
+            continue
 
+        # search_menu matched on Swiggy's side, so a spelling variant
+        # ("Daal Makhni") still counts as a loose match.
+        level = max(_keyword_match(dish.get("name", "").lower(), [term])[0], 1)
+        rest_rating = rest.get("rating") if rest else None
+        candidates.append({
+            **dish,
+            "eta":          rest.get("eta") if rest else None,
+            "deliveryTime": rest.get("deliveryTime") if rest else None,
+            "rating":       rest_rating if rest_rating is not None else dish.get("dishRating"),
+            "cuisines":     rest.get("cuisines", "") if rest else "",
+            "category":     "",
+            "placeholder":  "🍽️",
+            "_restaurant_score": float(rest_rating or dish.get("dishRating") or 0),
+            "_kw_level":    level,
+            "_matched_term": term,
+            "_match_kind":  {3: "exact", 2: "all_words"}.get(level, "category"),
+        })
+
+    # Loose matches only fill in when strong ones can't make a card row.
+    strong = [c for c in candidates if c["_kw_level"] >= 2]
+    if len(strong) >= 3:
+        candidates = strong
     if not candidates:
         return []
 
-    # Multi-factor scoring matching architecture §6:
-    #   rating_score      — restaurant rating, 4.0★ baseline → 100 at 5.0★
-    #   eta_score         — faster = higher
-    #   price_value       — cheaper within budget = higher
-    #   bestseller_bonus  — +20 lift for Swiggy "Bestseller" tag
-    # Weights shift by intent (fast → eta matters more; budget → price matters
-    # more) using the existing phase_05/weights.py table.
-    from phases.phase_04.utils.parse_eta import parse_eta as _parse_eta
     weights = get_weights(intent)
     budget = intent.budget_max or 500
 
     def _score(d: dict) -> float:
-        rating = float(d.get("_restaurant_score") or 0)
-        rating_score = max(0.0, min(100.0, (rating - 4.0) * 100.0))
-        eta_min = _parse_eta(d.get("deliveryTime", "")) if d.get("deliveryTime") else 45
+        rating_score = max(0.0, min(100.0, (d["_restaurant_score"] - 4.0) * 100.0))
+        eta_min = _parse_eta(d["deliveryTime"]) if d.get("deliveryTime") else 45
         eta_score = max(0.0, min(100.0, (60.0 - eta_min) / 60.0 * 100.0))
         price = float(d.get("price") or 0)
-        price_value = max(0.0, min(100.0, (budget - price) / budget * 100.0)) if budget else 50.0
-        bestseller_bonus = 20.0 if d.get("bestseller") else 0.0
-        # KEYWORD-MATCH BOOST — the single most important relevance signal.
-        # "butter chicken" must rank above "chicken roll" when the user typed
-        # "butter chicken". The boost is bigger than the bestseller bonus
-        # because exact match is a stronger signal than menu popularity.
-        name_lc = d.get("name", "").lower()
-        if exact_phrase and exact_phrase in name_lc:
-            keyword_bonus = 60.0          # full phrase match — strongest
-            d["_match_kind"] = "exact"
-        elif exact_phrase and all(w in name_lc for w in exact_phrase.split()):
-            keyword_bonus = 35.0          # all phrase words in any order
-            d["_match_kind"] = "all_words"
-        else:
-            keyword_bonus = 0.0
-            d["_match_kind"] = "category"
+        price_value = max(0.0, min(100.0, (budget - price) / budget * 100.0))
+        dish_rating = d.get("dishRating") or 0
+        dish_bonus = 10.0 if dish_rating >= 4.5 else 5.0 if dish_rating >= 4.0 else 0.0
+        keyword_bonus = {3: 60.0, 2: 35.0, 1: 15.0}[d["_kw_level"]]
         return (
             weights.get("rating", 0.2) * rating_score
             + weights.get("eta", 0.2) * eta_score
             + weights.get("price", 0.15) * price_value
-            + bestseller_bonus
+            + dish_bonus
             + keyword_bonus
         )
 
@@ -493,17 +577,29 @@ async def _gather_dish_recommendations(
         d["_score"] = _score(d)
     candidates.sort(key=lambda d: -d["_score"])
 
-    # Cross-result dedupe by normalised dish name (architecture: avoid
-    # showing "Chicken Roll" from 3 different restaurants — same dish, fake
-    # variety). Higher-scored copy wins. We still dedupe within a restaurant
-    # (same dish across menu categories) for free with this same pass.
-    seen_names: set[str] = set()
+    seen: set = set()
     deduped: list[dict] = []
     for d in candidates:
-        norm_name = re.sub(r"[^a-z0-9]+", " ", d.get("name", "").lower()).strip()
-        if norm_name in seen_names:
+        norm = re.sub(r"[^a-z0-9]+", " ", d.get("name", "").lower()).strip()
+        key = norm if variety else (norm, d.get("restaurantId"))
+        if key in seen:
             continue
-        seen_names.add(norm_name)
+        seen.add(key)
         deduped.append(d)
 
-    return deduped[:6]
+    per_rest: Counter = Counter()
+    picked: list[dict] = []
+    covered_terms: set[str] = set()
+    for require_new_term in ((True, False) if variety else (False,)):
+        for d in deduped:
+            if len(picked) >= 6:
+                break
+            if any(p is d for p in picked) or per_rest[d["restaurantId"]] >= _MAX_PER_RESTAURANT:
+                continue
+            if require_new_term and d["_matched_term"] in covered_terms:
+                continue
+            picked.append(d)
+            per_rest[d["restaurantId"]] += 1
+            covered_terms.add(d["_matched_term"])
+    return picked
+

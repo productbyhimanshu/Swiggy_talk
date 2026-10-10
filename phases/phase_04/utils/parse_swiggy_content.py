@@ -19,6 +19,7 @@ scorer, persona, address picker, and frontend can consume.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 
@@ -189,9 +190,75 @@ def parse_addresses(content: list[dict]) -> list[dict]:
     return addresses
 
 
+_AD_SUFFIX_RE = re.compile(r"\s*\(Ad\)\s*$")
+
+
+def _restaurant_from_json(d: dict) -> dict | None:
+    """Map one restaurant from Swiggy's JSON search payload to our dict shape."""
+    rest_id = str(d.get("id") or d.get("restaurantId") or "").strip()
+    if not rest_id:
+        return None
+    name = _AD_SUFFIX_RE.sub("", str(d.get("name") or "")).strip()
+    raw_cuisines = d.get("cuisines") or []
+    if isinstance(raw_cuisines, list):
+        cuisines = ", ".join(c.strip() for c in raw_cuisines if isinstance(c, str) and c.strip())
+    else:
+        cuisines = str(raw_cuisines).strip()
+    try:
+        rating = float(d.get("avgRating")) if d.get("avgRating") is not None else None
+    except (TypeError, ValueError):
+        rating = None
+    try:
+        eta = int(d.get("deliveryTimeMinutes") or 0)
+    except (TypeError, ValueError):
+        eta = 0
+    cost_digits = re.search(r"\d+", str(d.get("costForTwo") or ""))
+    cost = int(cost_digits.group()) if cost_digits else 0
+    return {
+        "restaurantId": rest_id,
+        "id": rest_id,
+        "availabilityStatus": d.get("availabilityStatus") or "OPEN",
+        "name": name,
+        "restaurant": name,
+        "cuisines": cuisines,
+        "rating": rating,
+        "deliveryTime": f"{eta} min",
+        "eta": eta,
+        "costForTwo": cost,
+        "price": cost,
+        "priceLabel": "for 2",
+        "imageUrl": d.get("imageUrl"),
+        "areaName": d.get("areaName"),
+        "distanceKm": d.get("distanceKm"),
+        "placeholder": _cuisine_emoji(cuisines),
+        "veg": None,
+    }
+
+
+def _parse_restaurants_json(text: str) -> list[dict] | None:
+    """Return parsed restaurants if `text` is Swiggy's JSON payload, else None."""
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return None
+    # Swiggy appends a plain-text rendering note after the JSON object, so
+    # decode only the leading object and ignore whatever follows it.
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(stripped)
+    except ValueError:
+        return None
+    items = payload.get("restaurants") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return None
+    return [r for r in (_restaurant_from_json(d) for d in items if isinstance(d, dict)) if r]
+
+
 def parse_restaurants(content: list[dict]) -> list[dict]:
     """
     Convert a Swiggy MCP content-block list into structured restaurant dicts.
+
+    Swiggy has shipped two text formats: a JSON object ({"restaurants": [...]})
+    and the older numbered-line blob. JSON is tried first; the regex handles
+    the legacy format.
 
     Each returned dict has fields expected by the scorer, persona, and
     frontend DishCard:
@@ -204,6 +271,10 @@ def parse_restaurants(content: list[dict]) -> list[dict]:
         if not isinstance(block, dict) or block.get("type") != "text":
             continue
         text = block.get("text", "")
+        from_json = _parse_restaurants_json(text)
+        if from_json is not None:
+            restaurants.extend(from_json)
+            continue
         for m in _RESTAURANT_RE.finditer(text):
             name, cuisines, rating_s, eta_s, cost_s, rest_id = m.groups()
             eta_int = int(eta_s)
