@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { apiFetch } from "../../api/fetch";
 
 // Fetches the proactive opener — time-aware + memory-driven greeting.
 // Falls back to the seed chips if the backend isn't reachable.
@@ -6,7 +7,7 @@ export default function EmptyHello({ chips, onChip }) {
   const [opener, setOpener] = useState(null);
 
   useEffect(() => {
-    fetch("/api/opener")
+    apiFetch("/api/opener")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => data && setOpener(data))
       .catch(() => {});

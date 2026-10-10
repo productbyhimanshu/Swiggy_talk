@@ -40,6 +40,10 @@ class Settings(BaseSettings):
         default="https://mcp.swiggy.com/food", alias="SWIGGY_FOOD_URL"
     )
 
+    # HMAC key for signing the bhook_uid identity cookie. Required in production.
+    # Generate with: openssl rand -hex 32
+    session_secret: str = Field(default="", alias="SESSION_SECRET")
+
     frontend_url: str = Field(default="http://localhost:5173", alias="FRONTEND_URL")
     log_level: str = Field(default="debug", alias="LOG_LEVEL")
     log_dir: str = Field(default="logs", alias="LOG_DIR")

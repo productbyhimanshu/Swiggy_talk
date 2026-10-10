@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Close } from "../../icons/index.jsx";
+import { apiFetch } from "../../api/fetch";
 
 /**
  * Phase 13 — Post-order status screen.
@@ -21,7 +22,7 @@ export default function OrderStatus({ open, onClose, placed }) {
 
     async function poll() {
       try {
-        const r = await fetch(`/api/order/status/${encodeURIComponent(orderId)}`);
+        const r = await apiFetch(`/api/order/status/${encodeURIComponent(orderId)}`);
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
           throw new Error(d.detail || `status ${r.status}`);

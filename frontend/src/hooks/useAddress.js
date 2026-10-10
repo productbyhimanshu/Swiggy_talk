@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from "react";
+import { apiFetch } from "../api/fetch";
 
 /**
  * Manages delivery address state for the popup picker.
@@ -22,7 +23,7 @@ export function useAddress(sessionId) {
     setLoading(true);
     setError(null);
     try {
-      const res  = await fetch(`/api/addresses?session_id=${encodeURIComponent(sessionId)}`);
+      const res  = await apiFetch(`/api/addresses?session_id=${encodeURIComponent(sessionId)}`);
       const data = await res.json();
       setAddresses(data.addresses || []);
       fetched.current = true;
@@ -40,7 +41,7 @@ export function useAddress(sessionId) {
     setIsOpen(false);
     // Tell backend so search_restaurants can use this addressId
     try {
-      await fetch("/api/set-address", {
+      await apiFetch("/api/set-address", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

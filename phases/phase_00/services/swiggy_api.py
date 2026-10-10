@@ -10,7 +10,7 @@ import httpx
 from phases.phase_00.config import Settings, get_settings
 from phases.phase_00.logging_setup import get_logger
 from phases.phase_00.services.order_guard import OrderDisabledError, assert_orders_enabled
-from phases.phase_00.services.swiggy_auth import SwiggyAuthError, SwiggyAuthService
+from phases.phase_00.services.swiggy_auth import ReauthRequired, SwiggyAuthError, SwiggyAuthService
 
 log = get_logger(__name__)
 
@@ -59,9 +59,10 @@ class SwiggyApiClient:
     def _require_token(self) -> str:
         token = self.auth.get_access_token()
         if not token:
-            raise SwiggyAuthError(
-                "Not authenticated or token expired. "
-                "Run `python phases/phase_00/services/swiggy_auth.py` to authenticate."
+            # Multi-user: the frontend's fetch wrapper turns this into a
+            # "Reconnect Swiggy" banner. The CLI path reads from .env instead.
+            raise ReauthRequired(
+                "No valid Swiggy token for this user. Sign in via /auth/swiggy/login."
             )
         return token
 
@@ -119,8 +120,21 @@ class SwiggyApiClient:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(url, json=payload, headers=headers)
 
-        if response.status_code == 401:
-            raise SwiggyAuthError("Swiggy API returned 401 — re-run OAuth")
+        if response.status_code in (401, 419):
+            # 401 = token revoked / expired early. 419 = Swiggy session revoked
+            # (full re-login needed). Both map to the same frontend state:
+            # drop the stored token and prompt the user to reconnect.
+            try:
+                from phases.phase_00.services.identity import current_uid_var
+                from phases.phase_00.services.token_store import get_token_store
+                uid = current_uid_var.get()
+                if uid:
+                    get_token_store().delete(uid)
+            except Exception:
+                pass
+            raise ReauthRequired(
+                f"Swiggy returned {response.status_code} — user must re-authenticate."
+            )
         if response.status_code >= 400:
             raise SwiggyApiError(
                 f"HTTP {response.status_code}: {response.text}",

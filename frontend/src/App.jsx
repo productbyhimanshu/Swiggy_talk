@@ -1,30 +1,34 @@
 import { useState } from "react";
 import ChatPanel from "./components/Chat/ChatPanel";
 import DesktopShell from "./components/Layout/DesktopShell";
+import AuthGate from "./components/Auth/AuthGate";
+import ReconnectBanner from "./components/Auth/ReconnectBanner";
 
 export default function App() {
-  const [device, setDevice] = useState("desktop"); // "mobile" | "desktop"
+  const [device, setDevice] = useState("desktop");
 
   return (
-    <div className="app">
-      {device === "desktop" ? (
-        <DesktopShell />
-      ) : (
-        <div className="mobile-frame">
-          <ChatPanel />
-        </div>
-      )}
+    <AuthGate>
+      <div className="app">
+        <ReconnectBanner />
+        {device === "desktop" ? (
+          <DesktopShell />
+        ) : (
+          <div className="mobile-frame">
+            <ChatPanel />
+          </div>
+        )}
 
-      {/* Single device toggle, bottom-right, out of the way of cart/composer CTAs */}
-      <button
-        onClick={() => setDevice((d) => (d === "mobile" ? "desktop" : "mobile"))}
-        aria-label={`Switch to ${device === "mobile" ? "desktop" : "mobile"} view`}
-        style={deviceToggleStyle}
-        title={`Currently ${device} — click to switch`}
-      >
-        {device === "mobile" ? "📱 mobile" : "🖥️ desktop"}
-      </button>
-    </div>
+        <button
+          onClick={() => setDevice((d) => (d === "mobile" ? "desktop" : "mobile"))}
+          aria-label={`Switch to ${device === "mobile" ? "desktop" : "mobile"} view`}
+          style={deviceToggleStyle}
+          title={`Currently ${device} — click to switch`}
+        >
+          {device === "mobile" ? "📱 mobile" : "🖥️ desktop"}
+        </button>
+      </div>
+    </AuthGate>
   );
 }
 

@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { apiFetch } from "../api/fetch";
 
 // Optimistic cart (architecture §9): UI updates instantly, Swiggy sync runs in
 // the background via /api/cart/add | /api/cart/remove. Items carry a `synced`
@@ -17,7 +18,7 @@ export function useCart(sessionId) {
     (dish, qty) => {
       if (!sessionId) return;
       const endpoint = qty > 0 ? "/api/cart/add" : "/api/cart/remove";
-      fetch(endpoint, {
+      apiFetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

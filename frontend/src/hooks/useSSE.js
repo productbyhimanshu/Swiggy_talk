@@ -1,5 +1,7 @@
+import { apiFetch } from "../api/fetch";
+
 export async function* streamChat(message, sessionId) {
-  const response = await fetch("/api/chat", {
+  const response = await apiFetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, session_id: sessionId }),

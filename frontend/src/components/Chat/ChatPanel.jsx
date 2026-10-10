@@ -15,6 +15,7 @@ import CartBar from "../Cart/CartBar";
 import BasketSheet from "../Cart/BasketSheet";
 import ReviewSheet from "../Cart/ReviewSheet";
 import OrderStatus from "../Cart/OrderStatus";
+import { apiFetch } from "../../api/fetch";
 
 export default function ChatPanel({ shape = "rounded", layout = "carousel", density = "default" }) {
   const chat      = useChat();
@@ -45,7 +46,7 @@ export default function ChatPanel({ shape = "rounded", layout = "carousel", dens
     const added = cartState.addToCart(dish);
     if (added) {
       // Track restaurant in backend session so "More from here" works
-      fetch("/api/set-restaurant", {
+      apiFetch("/api/set-restaurant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

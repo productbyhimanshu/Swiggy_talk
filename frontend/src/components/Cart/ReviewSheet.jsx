@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Close } from "../../icons/index.jsx";
+import { apiFetch } from "../../api/fetch";
 
 /**
  * Phase 13 — Review screen.
@@ -41,7 +42,7 @@ export default function ReviewSheet({ open, onClose, sessionId, onPlaced, cart, 
     let alive = true;
     setLoading(true);
     setError(null);
-    fetch("/api/order/review", {
+    apiFetch("/api/order/review", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: sessionId, ...clientPayload() }),
@@ -63,7 +64,7 @@ export default function ReviewSheet({ open, onClose, sessionId, onPlaced, cart, 
     setPlacing(true);
     setPlaceErr(null);
     try {
-      const r = await fetch("/api/order/place", {
+      const r = await apiFetch("/api/order/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

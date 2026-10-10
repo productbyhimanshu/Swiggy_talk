@@ -5,12 +5,23 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from phases.phase_00.config import get_settings
 from phases.phase_00.logging_setup import configure_logging, get_log_paths, get_logger
-from phases.phase_00.services.swiggy_auth import SwiggyAuthError, SwiggyAuthService
+from phases.phase_00.services.identity import (
+    IdentityMiddleware,
+    clear_identity_cookie,
+    current_uid_var,
+)
+from phases.phase_00.services.swiggy_auth import (
+    ReauthRequired,
+    SwiggyAuthError,
+    SwiggyAuthService,
+)
+from phases.phase_00.services.token_store import get_token_store
+from phases.phase_01.models.state import SessionOwnershipError
 
 configure_logging()
 log = get_logger(__name__)
@@ -82,7 +93,27 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# Order matters: IdentityMiddleware must run BEFORE any route reads
+# current_uid_var. Starlette runs middleware in reverse-add order, so
+# add IdentityMiddleware last.
 app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(IdentityMiddleware)
+
+
+@app.exception_handler(ReauthRequired)
+async def reauth_required_handler(request: Request, exc: ReauthRequired):
+    """Any Swiggy 401/419 inside the request pipeline → structured 401 for the frontend."""
+    return JSONResponse(
+        status_code=401,
+        content={"error": "reauth_required", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(SessionOwnershipError)
+async def session_ownership_handler(request: Request, exc: SessionOwnershipError):
+    """Someone's cookie tried to open a session that belongs to another cookie."""
+    log.warning("session_ownership_denied", path=request.url.path)
+    return JSONResponse(status_code=404, content={"error": "session_not_found"})
 
 
 @app.get("/health")
@@ -100,7 +131,7 @@ async def health():
 
 @app.get("/auth/swiggy/login")
 async def swiggy_login():
-    """Start OAuth — redirects browser to Swiggy consent UI."""
+    """Start OAuth for the current cookie user — redirects to Swiggy consent."""
     auth = SwiggyAuthService()
     try:
         url, _state = auth.build_authorization_url()
@@ -116,7 +147,7 @@ async def swiggy_callback(
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
 ):
-    """OAuth redirect handler — exchanges code for tokens."""
+    """OAuth redirect — exchanges code → saves token for the current user → redirects to app."""
     if error:
         log.warning("oauth_callback_error", oauth_error=error)
         raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
@@ -132,30 +163,32 @@ async def swiggy_callback(
         log.warning("oauth_token_exchange_failed", error=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return HTMLResponse(
-        """
-        <!DOCTYPE html>
-        <html>
-        <head><title>Swiggy Talk — Connected</title></head>
-        <body style="font-family: system-ui; padding: 2rem;">
-          <h1>Swiggy connected</h1>
-          <p>OAuth complete. Tokens saved locally. You can close this tab.</p>
-          <p>Test: <code>GET /auth/status</code> or run <code>scripts/swiggy_smoke.py</code></p>
-        </body>
-        </html>
-        """
-    )
+    # Land users back on the app. In dev the frontend is on :5173; in prod
+    # it's served from this host.
+    settings = get_settings()
+    return RedirectResponse(settings.frontend_url or "/")
 
 
 @app.get("/auth/status")
 async def auth_status():
-    """Check whether a valid Swiggy token is stored."""
+    """Whether THIS cookie's user has a valid token."""
     auth = SwiggyAuthService()
-    token = auth.get_access_token()  # None when missing or expiring within 5 min
-    expiry = auth.settings.swiggy_token_expiry
-    hours_left = max(0.0, round((expiry - time.time()) / 3600, 1)) if expiry else 0.0
+    uid = current_uid_var.get()
+    rec = get_token_store().get(uid) if uid else None
+    now = time.time()
+    authenticated = bool(rec and now < (rec.expires_at - 300))
+    hours_left = max(0.0, round((rec.expires_at - now) / 3600, 1)) if rec else 0.0
     return {
-        "authenticated": token is not None,
+        "authenticated": authenticated,
         "expires_in_hours": hours_left,
         "login_url": "/auth/swiggy/login",
     }
+
+
+@app.post("/auth/logout")
+async def swiggy_logout(request: Request):
+    """Delete this user's token AND clear the identity cookie — fresh anonymous on next load."""
+    SwiggyAuthService().logout()
+    response = JSONResponse({"ok": True})
+    clear_identity_cookie(response, is_https=request.url.scheme == "https")
+    return response

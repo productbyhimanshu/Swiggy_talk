@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from phases.phase_00.services.identity import current_uid_var
 from phases.phase_00.services.order_guard import OrderDisabledError, assert_orders_enabled
 from phases.phase_04.utils.parse_eta import parse_eta
 
@@ -45,6 +46,7 @@ class ScheduledJob:
     delivery_target: datetime
     eta_minutes: int
     fire_at: datetime
+    uid: str = ""  # owner — set from current_uid_var on create; also used at fire time
     restaurant_id: str | None = None
     cancelled: bool = False
     fired: bool = False
@@ -177,6 +179,10 @@ def execute_scheduled_order(job_id: str) -> dict:
         log.info("execute_scheduled_order: job already fired job=%s", job_id)
         return {"ok": False, "reason": "already_fired"}
 
+    # Set the owner's identity so downstream Swiggy / memory calls see the
+    # right user. The CLI/test path has job.uid == "" and this is a no-op.
+    uid_token = current_uid_var.set(job.uid) if job.uid else None
+
     try:
         # SAFETY GATE — raises OrderDisabledError until Phase 12 gate passes
         assert_orders_enabled()
@@ -195,6 +201,10 @@ def execute_scheduled_order(job_id: str) -> dict:
         log.error("execute_scheduled_order: unexpected error job=%s err=%s", job_id, exc)
         job.result = {"error": str(exc)}
         return {"ok": False, "reason": "unexpected_error", "detail": str(exc)}
+
+    finally:
+        if uid_token is not None:
+            current_uid_var.reset(uid_token)
 
 
 # ── Public job API ─────────────────────────────────────────────────────────────
@@ -215,9 +225,15 @@ def create_job(
     timing = calculate_order_time(delivery_target, eta_str, now=now)
     job_id = _make_job_id(session_id)
 
+    try:
+        uid = current_uid_var.get() or ""
+    except LookupError:
+        uid = ""
+
     job = ScheduledJob(
         job_id=job_id,
         session_id=session_id,
+        uid=uid,
         delivery_target=delivery_target,
         eta_minutes=timing["eta_minutes"],
         fire_at=timing["fire_at"],

@@ -5,13 +5,20 @@ services:
     region: singapore
     plan: free
     buildCommand: pip install -r backend/requirements.txt && cd frontend && npm ci && npm run build
-    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    # --proxy-headers + forwarded-allow-ips: trust Render's proxy so the app sees
+    # https and marks the login cookie Secure.
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips '*'
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: NODE_VERSION
         value: 20.18.0
+
+      # Signs the per-visitor login cookie. Required for multi-user login.
+      - key: SESSION_SECRET
+        generateValue: true
+
       - key: ORDER_ENABLED
         value: "false"
       - key: FRONTEND_URL
@@ -22,11 +29,17 @@ services:
         value: https://mcp.swiggy.com/food
       - key: SWIGGY_OAUTH_BASE_URL
         value: https://mcp.swiggy.com
+      - key: LOG_LEVEL
+        value: info
+
+      # Set in the Render dashboard (kept out of the repo).
       - key: GEMINI_API_KEY
         sync: false
+      - key: EMERGENT_LLM_KEY
+        sync: false
+      # Optional — blank means dynamic registration on first login (cached in SQLite).
       - key: SWIGGY_OAUTH_CLIENT_ID
         sync: false
       - key: SWIGGY_OAUTH_CLIENT_SECRET
         sync: false
-      - key: SWIGGY_ACCESS_TOKEN
-        sync: false
+      # No SWIGGY_ACCESS_TOKEN: tokens are per user now, stored after each login.

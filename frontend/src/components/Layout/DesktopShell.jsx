@@ -14,6 +14,7 @@ import DishCardList from "../Recommendations/DishCardList";
 import DesktopCart from "../Cart/DesktopCart";
 import ReviewSheet from "../Cart/ReviewSheet";
 import OrderStatus from "../Cart/OrderStatus";
+import { apiFetch } from "../../api/fetch";
 
 export default function DesktopShell({ shape = "rounded", layout = "carousel", density = "default" }) {
   const chat      = useChat();
@@ -42,7 +43,7 @@ export default function DesktopShell({ shape = "rounded", layout = "carousel", d
   function handleAdd(dish) {
     const added = cartState.addToCart(dish);
     if (added) {
-      fetch("/api/set-restaurant", {
+      apiFetch("/api/set-restaurant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -115,6 +116,16 @@ export default function DesktopShell({ shape = "rounded", layout = "carousel", d
           </div>
           <button className="new-chat" onClick={handleReset}>
             <Refresh /> start a new chat
+          </button>
+          <button
+            className="new-chat"
+            onClick={async () => {
+              try { await apiFetch("/auth/logout", { method: "POST" }); } catch {}
+              window.location.reload();
+            }}
+            style={{ marginTop: 6, opacity: 0.7 }}
+          >
+            Log out
           </button>
         </div>
       </div>

@@ -1,43 +1,33 @@
-"""Long-term memory — SQLite-backed per-app state.
+"""Long-term memory — per-user SQLite-backed state.
 
-Architecture note: Swiggy Talk is single-user by design (architecture §20 — no
-multi-user auth). Memory is therefore per-app, not per-user. One DB file lives
-at .memory/user.db. Schema migrations are forward-only (additive).
+Architecture: every row is scoped by `uid` (the signed-cookie identity). Reads
+and writes implicitly use `current_uid_var` so call sites stay unchanged — only
+the IdentityMiddleware must have run first.
 
-Public surface (the only functions the rest of the codebase should call):
+Public surface:
 
-  • get_user_facts() → list[str]
-        Top short facts to inject into the persona system prompt.
-        Example: ["likes Wow! Momo (3 orders)", "veg-only", "max ₹500"].
+  • get_user_facts() → list[str]        — short facts for the persona prompt
+  • record_order(...)                   — append on checkout
+  • record_rejection(query, dishes)     — on dismissed recommendations
+  • suggest_usual(now) → dict | None    — proactive opener data
+  • set_preference / get_preference     — free-form k/v
 
-  • record_order(restaurant_id, restaurant_name, items, total)
-        Called when the cart is checked out (or, in dev, when items are added).
-
-  • record_rejection(query, dish_names)
-        Called when the user dismisses recommendations without picking one.
-
-  • suggest_usual(time_of_day) → dict | None
-        For proactive openers: "Same Wow! Momo as last Tuesday?".
-
-  • set_preference(key, value) / get_preference(key)
-        Free-form k/v store for user-stated defaults.
-
-All writes are best-effort — failures are logged but never raised. The chat
-loop must never crash on memory issues.
+All writes are best-effort. Failures are logged, never raised.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from phases.phase_00.services.identity import current_uid_var
 
 log = logging.getLogger(__name__)
 
@@ -45,12 +35,15 @@ _DB_PATH = Path(__file__).resolve().parents[3] / ".memory" / "user.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS profile (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+    uid   TEXT NOT NULL,
+    key   TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (uid, key)
 );
 
 CREATE TABLE IF NOT EXISTS orders (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid             TEXT    NOT NULL,
     ts              REAL    NOT NULL,
     restaurant_id   TEXT,
     restaurant_name TEXT,
@@ -60,19 +53,28 @@ CREATE TABLE IF NOT EXISTS orders (
 
 CREATE TABLE IF NOT EXISTS rejections (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid    TEXT    NOT NULL,
     ts     REAL    NOT NULL,
     query  TEXT    NOT NULL,
     dishes TEXT    NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS orders_ts ON orders(ts);
-CREATE INDEX IF NOT EXISTS rejections_ts ON rejections(ts);
+CREATE INDEX IF NOT EXISTS orders_uid_ts     ON orders(uid, ts);
+CREATE INDEX IF NOT EXISTS rejections_uid_ts ON rejections(uid, ts);
 """
+
+
+def _current_uid() -> str | None:
+    """Resolve the active user. Returns None in CLI / test paths where no middleware ran."""
+    try:
+        uid = current_uid_var.get()
+    except LookupError:
+        return None
+    return uid or None
 
 
 @contextmanager
 def _conn():
-    """Open a SQLite connection — best-effort, swallow filesystem errors."""
     try:
         _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         c = sqlite3.connect(str(_DB_PATH), timeout=2.0)
@@ -90,22 +92,31 @@ def _conn():
 
 # ── Profile (k/v) ─────────────────────────────────────────────────────────────
 
-def set_preference(key: str, value: Any) -> None:
+
+def set_preference(key: str, value: Any, uid: str | None = None) -> None:
+    uid = uid or _current_uid()
+    if not uid:
+        return
     with _conn() as c:
         if c is None:
             return
         c.execute(
-            "INSERT INTO profile(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, json.dumps(value)),
+            "INSERT INTO profile(uid, key, value) VALUES (?, ?, ?) "
+            "ON CONFLICT(uid, key) DO UPDATE SET value=excluded.value",
+            (uid, key, json.dumps(value)),
         )
 
 
-def get_preference(key: str, default: Any = None) -> Any:
+def get_preference(key: str, default: Any = None, uid: str | None = None) -> Any:
+    uid = uid or _current_uid()
+    if not uid:
+        return default
     with _conn() as c:
         if c is None:
             return default
-        row = c.execute("SELECT value FROM profile WHERE key=?", (key,)).fetchone()
+        row = c.execute(
+            "SELECT value FROM profile WHERE uid=? AND key=?", (uid, key)
+        ).fetchone()
         if not row:
             return default
         try:
@@ -116,43 +127,48 @@ def get_preference(key: str, default: Any = None) -> Any:
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
+
 def record_order(
     restaurant_id: str | None,
     restaurant_name: str | None,
     items: list[dict],
     total: float = 0.0,
+    uid: str | None = None,
 ) -> None:
-    """Append an order. `items` should be a JSON-serialisable list of dish dicts."""
+    uid = uid or _current_uid()
+    if not uid:
+        return
     with _conn() as c:
         if c is None:
             return
-        # Drop fields we don't need long-term (images, scores)
         compact = [
             {
-                "id":      it.get("id") or it.get("itemId"),
-                "name":    it.get("name"),
-                "price":   it.get("price"),
-                "veg":     it.get("veg"),
-                "qty":     it.get("qty", 1),
+                "id":    it.get("id") or it.get("itemId"),
+                "name":  it.get("name"),
+                "price": it.get("price"),
+                "veg":   it.get("veg"),
+                "qty":   it.get("qty", 1),
             }
             for it in items
         ]
         c.execute(
-            "INSERT INTO orders(ts, restaurant_id, restaurant_name, items_json, total) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (time.time(), restaurant_id, restaurant_name, json.dumps(compact), total),
+            "INSERT INTO orders(uid, ts, restaurant_id, restaurant_name, items_json, total) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (uid, time.time(), restaurant_id, restaurant_name, json.dumps(compact), total),
         )
 
 
-def recent_orders(limit: int = 10) -> list[dict]:
-    """Return the last N orders, most recent first."""
+def recent_orders(limit: int = 10, uid: str | None = None) -> list[dict]:
+    uid = uid or _current_uid()
+    if not uid:
+        return []
     with _conn() as c:
         if c is None:
             return []
         rows = c.execute(
             "SELECT ts, restaurant_id, restaurant_name, items_json, total "
-            "FROM orders ORDER BY ts DESC LIMIT ?",
-            (limit,),
+            "FROM orders WHERE uid=? ORDER BY ts DESC LIMIT ?",
+            (uid, limit),
         ).fetchall()
         out: list[dict] = []
         for r in rows:
@@ -172,40 +188,40 @@ def recent_orders(limit: int = 10) -> list[dict]:
 
 # ── Rejections ────────────────────────────────────────────────────────────────
 
-def record_rejection(query: str, dishes: list[str]) -> None:
+
+def record_rejection(query: str, dishes: list[str], uid: str | None = None) -> None:
+    uid = uid or _current_uid()
+    if not uid:
+        return
     with _conn() as c:
         if c is None:
             return
         c.execute(
-            "INSERT INTO rejections(ts, query, dishes) VALUES (?, ?, ?)",
-            (time.time(), query, json.dumps(dishes)),
+            "INSERT INTO rejections(uid, ts, query, dishes) VALUES (?, ?, ?, ?)",
+            (uid, time.time(), query, json.dumps(dishes)),
         )
 
 
 # ── Reading derived facts ─────────────────────────────────────────────────────
 
-def get_user_facts(max_facts: int = 5) -> list[str]:
-    """
-    Compact short facts to inject into a persona/system prompt.
 
-    Returns up to `max_facts` strings. Each fact is < 40 chars so several can
-    fit without blowing the context budget.
-    """
+def get_user_facts(max_facts: int = 5, uid: str | None = None) -> list[str]:
+    uid = uid or _current_uid()
+    if not uid:
+        return []
     facts: list[str] = []
 
-    # Explicit preferences win first
-    veg = get_preference("veg_default")
+    veg = get_preference("veg_default", uid=uid)
     if veg == "veg":
         facts.append("veg only")
     elif veg == "nonveg":
         facts.append("eats non-veg")
 
-    budget = get_preference("max_budget")
+    budget = get_preference("max_budget", uid=uid)
     if isinstance(budget, (int, float)) and budget > 0:
         facts.append(f"max budget ~₹{int(budget)}")
 
-    # Most-frequent restaurant in recent orders
-    recent = recent_orders(limit=20)
+    recent = recent_orders(limit=20, uid=uid)
     if recent:
         by_rest = Counter(
             r["restaurant_name"] for r in recent if r["restaurant_name"]
@@ -214,7 +230,6 @@ def get_user_facts(max_facts: int = 5) -> list[str]:
         if top_rest and n >= 2:
             facts.append(f"orders from {top_rest} often ({n}x)")
 
-        # Most-recent order
         last = recent[0]
         if last["restaurant_name"]:
             ago = datetime.fromtimestamp(last["ts"])
@@ -226,21 +241,17 @@ def get_user_facts(max_facts: int = 5) -> list[str]:
     return facts[:max_facts]
 
 
-def suggest_usual(now: datetime | None = None) -> dict | None:
-    """
-    Find the most-frequent order around the current time-of-day.
-    Returns {restaurant_name, items, n_times} or None.
-
-    Used by the proactive opener: "Same Wow! Momo as last Tuesday?"
-    """
+def suggest_usual(now: datetime | None = None, uid: str | None = None) -> dict | None:
+    uid = uid or _current_uid()
+    if not uid:
+        return None
     now = now or datetime.now()
     hour = now.hour
 
-    # Group orders by the slot they fell in
     def slot(ts: float) -> int:
         return datetime.fromtimestamp(ts).hour
 
-    matching = [o for o in recent_orders(limit=50) if abs(slot(o["ts"]) - hour) <= 1]
+    matching = [o for o in recent_orders(limit=50, uid=uid) if abs(slot(o["ts"]) - hour) <= 1]
     if not matching:
         return None
 
@@ -249,10 +260,9 @@ def suggest_usual(now: datetime | None = None) -> dict | None:
         return None
 
     top_rest, n = by_rest.most_common(1)[0]
-    if n < 2:  # Need at least 2 to call it a pattern
+    if n < 2:
         return None
 
-    # Find the latest order from that restaurant in the slot
     for o in matching:
         if o["restaurant_name"] == top_rest:
             return {
@@ -264,11 +274,16 @@ def suggest_usual(now: datetime | None = None) -> dict | None:
     return None
 
 
-def clear_all() -> None:
-    """Test helper — wipes the DB."""
+def clear_all(uid: str | None = None) -> None:
+    """Test helper. Without uid, wipes the whole DB."""
     with _conn() as c:
         if c is None:
             return
-        c.execute("DELETE FROM profile")
-        c.execute("DELETE FROM orders")
-        c.execute("DELETE FROM rejections")
+        if uid:
+            c.execute("DELETE FROM profile    WHERE uid=?", (uid,))
+            c.execute("DELETE FROM orders     WHERE uid=?", (uid,))
+            c.execute("DELETE FROM rejections WHERE uid=?", (uid,))
+        else:
+            c.execute("DELETE FROM profile")
+            c.execute("DELETE FROM orders")
+            c.execute("DELETE FROM rejections")

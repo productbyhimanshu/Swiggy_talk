@@ -7,8 +7,15 @@ from pydantic import BaseModel, Field
 from phases.phase_00.config import get_settings
 
 
+class SessionOwnershipError(LookupError):
+    """A different cookie's user tried to read someone else's session."""
+
+
 class ConversationState(BaseModel):
     session_id: str
+    # Owner cookie-user. Bound on create; the session store returns 404 if
+    # a different uid tries to read this session.
+    uid: str = ""
     awaiting_clarification: bool = False
     clarify_field: str | None = None
     current_intent: dict | None = None
