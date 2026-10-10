@@ -12,12 +12,16 @@ export default function AuthGate({ children }) {
   const [justConnected] = useState(
     () => new URLSearchParams(window.location.search).has("connected")
   );
+  const [authFailed] = useState(
+    () => new URLSearchParams(window.location.search).has("auth_error")
+  );
 
   useEffect(() => {
     let alive = true;
     const params = new URLSearchParams(window.location.search);
-    if (params.has("connected")) {
+    if (params.has("connected") || params.has("auth_error")) {
       params.delete("connected");
+      params.delete("auth_error");
       const qs = params.toString();
       window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : ""));
     }
@@ -62,6 +66,7 @@ export default function AuthGate({ children }) {
           </>
         ) : (
           <>
+            {authFailed && <p style={errorNote}>Sign-in didn't finish. Please try again.</p>}
             <a href="/auth/swiggy/login" style={cta}>Continue with Swiggy</a>
             <p style={fine}>You'll sign in on Swiggy.</p>
           </>
@@ -103,6 +108,14 @@ const cta   = {
   cursor: "pointer",
 };
 const fine  = { margin: "16px 0 0", color: "var(--mute, #8b8275)", fontSize: 12 };
+const errorNote = {
+  margin: "0 0 16px",
+  padding: "8px 12px",
+  background: "#fdecea",
+  color: "#a83232",
+  borderRadius: 8,
+  fontSize: 12,
+};
 const link  = {
   marginTop: 10,
   background: "none",

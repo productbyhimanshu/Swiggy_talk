@@ -31,7 +31,7 @@ import httpx
 
 from phases.phase_00.config import Settings, _ENV_FILE, get_settings
 from phases.phase_00.logging_setup import get_logger
-from phases.phase_00.services.identity import current_uid_var
+from phases.phase_00.services.identity import current_uid_var, sign_payload, verify_payload
 from phases.phase_00.services.token_store import TokenStore, get_token_store
 
 log = get_logger(__name__)
@@ -85,20 +85,16 @@ def generate_pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-# ── OAuth state store (per-login, in-memory, 10-min TTL) ─────────────────────
+# ── In-progress login (signed cookie, 10-min TTL) ────────────────────────────
 #
-# state_token → (verifier, uid, created_at). The state belongs to a specific
-# uid so another visitor's cookie can't complete the exchange.
+# The PKCE verifier, state and initiating uid travel in a signed HttpOnly
+# cookie instead of server memory, so a login survives server restarts
+# (Render restarts on every deploy and on free-tier wake-up) and any number
+# of workers. The callback only accepts it for the same uid that started it.
 
-_STATE_TTL_SECONDS = 10 * 60
-_PENDING_AUTH: dict[str, tuple[str, str, float]] = {}
-
-
-def _reap_expired_states(now: float) -> None:
-    cutoff = now - _STATE_TTL_SECONDS
-    for key, (_v, _uid, ts) in list(_PENDING_AUTH.items()):
-        if ts < cutoff:
-            _PENDING_AUTH.pop(key, None)
+OAUTH_COOKIE = "bhook_oauth"
+OAUTH_COOKIE_PURPOSE = "oauth_pending"
+STATE_TTL_SECONDS = 10 * 60
 
 
 # ── Service ──────────────────────────────────────────────────────────────────
@@ -180,11 +176,11 @@ class SwiggyAuthService:
 
     # ── Authorize URL (web flow) ─────────────────────────────────────────────
 
-    def build_authorization_url(self) -> tuple[str, str]:
+    def build_authorization_url(self) -> tuple[str, str, str]:
         """PKCE+state URL for the CURRENT user (uid taken from contextvar).
 
-        Stores `(verifier, uid, now)` under the state so the callback can
-        verify the caller is the same cookie that initiated the flow.
+        Returns (url, state_token, pending_cookie). The caller sets
+        pending_cookie as OAUTH_COOKIE; exchange_code() verifies it.
         """
         uid = current_uid_var.get()
         if not uid:
@@ -195,10 +191,10 @@ class SwiggyAuthService:
         client_id = self._resolve_client_id()
         verifier, challenge = generate_pkce_pair()
         state_token = secrets.token_urlsafe(16)
-
-        now = time.time()
-        _reap_expired_states(now)
-        _PENDING_AUTH[state_token] = (verifier, uid, now)
+        pending_cookie = sign_payload(
+            OAUTH_COOKIE_PURPOSE,
+            {"s": state_token, "v": verifier, "u": uid, "t": time.time()},
+        )
 
         params = {
             "response_type": "code",
@@ -211,29 +207,39 @@ class SwiggyAuthService:
         }
         base_url = self.settings.swiggy_oauth_base_url.rstrip("/")
         url = f"{base_url}/auth/authorize?{urlencode(params)}"
-        return url, state_token
+        return url, state_token, pending_cookie
 
     # ── Code exchange (web flow) ─────────────────────────────────────────────
 
-    async def exchange_code(self, code: str, state_token: str | None) -> None:
-        """Verify state → PKCE exchange → persist token for current uid.
+    async def exchange_code(
+        self, code: str, state_token: str | None, pending_cookie: str | None
+    ) -> None:
+        """Verify the in-progress login → PKCE exchange → persist token.
 
         Rejects if:
-          - state_token missing / unknown / expired
-          - state's uid != current cookie's uid (prevents cross-user hijack)
+          - state missing, or the pending cookie is missing / tampered / expired
+          - the state Swiggy echoed back differs from the one we issued
+          - the login was started by a different uid (cross-user hijack)
           - Swiggy's token endpoint returns >= 400
         """
         if not state_token:
             raise SwiggyAuthError("Missing state. Restart via /auth/swiggy/login.")
 
-        now = time.time()
-        _reap_expired_states(now)
-        pending = _PENDING_AUTH.pop(state_token, None)
-        if pending is None:
+        pending = (
+            verify_payload(OAUTH_COOKIE_PURPOSE, pending_cookie) if pending_cookie else None
+        )
+        if pending is None or not isinstance(pending.get("t"), (int, float)):
             raise SwiggyAuthError(
                 "Unknown or expired state. Restart via /auth/swiggy/login."
             )
-        verifier, state_uid, _ts = pending
+        if time.time() - pending["t"] > STATE_TTL_SECONDS:
+            raise SwiggyAuthError(
+                "Unknown or expired state. Restart via /auth/swiggy/login."
+            )
+        if pending.get("s") != state_token:
+            raise SwiggyAuthError("State mismatch. Restart via /auth/swiggy/login.")
+        verifier = str(pending.get("v") or "")
+        state_uid = str(pending.get("u") or "")
 
         current_uid = current_uid_var.get()
         if not current_uid:

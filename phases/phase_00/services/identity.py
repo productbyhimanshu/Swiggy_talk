@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import secrets
 from contextvars import ContextVar
 
@@ -65,6 +66,34 @@ def _verify(value: str) -> str | None:
     if not hmac.compare_digest(expected, value):
         return None
     return uid
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _payload_mac(purpose: str, body: str) -> str:
+    # `purpose` keeps a signature minted for one cookie from validating another.
+    msg = f"{purpose}:{body}".encode("utf-8")
+    return _b64(hmac.new(_secret_bytes(), msg, hashlib.sha256).digest())
+
+
+def sign_payload(purpose: str, payload: dict) -> str:
+    """Tamper-proof (not secret-from-the-holder) cookie value for a small dict."""
+    body = _b64(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    return f"{body}.{_payload_mac(purpose, body)}"
+
+
+def verify_payload(purpose: str, value: str) -> dict | None:
+    """Return the dict if the signature checks out, else None. Never raises."""
+    try:
+        body, mac = value.rsplit(".", 1)
+        if not hmac.compare_digest(_payload_mac(purpose, body), mac):
+            return None
+        data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def mint_uid() -> str:

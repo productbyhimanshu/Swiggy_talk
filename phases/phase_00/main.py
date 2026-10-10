@@ -16,6 +16,8 @@ from phases.phase_00.services.identity import (
     current_uid_var,
 )
 from phases.phase_00.services.swiggy_auth import (
+    OAUTH_COOKIE,
+    STATE_TTL_SECONDS,
     ReauthRequired,
     SwiggyAuthError,
     SwiggyAuthService,
@@ -130,45 +132,73 @@ async def health():
 
 
 @app.get("/auth/swiggy/login")
-async def swiggy_login():
+async def swiggy_login(request: Request):
     """Start OAuth for the current cookie user — redirects to Swiggy consent."""
     auth = SwiggyAuthService()
     try:
-        url, _state = auth.build_authorization_url()
+        url, _state, pending_cookie = auth.build_authorization_url()
     except SwiggyAuthError as exc:
         log.warning("oauth_login_failed", error=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return RedirectResponse(url)
+    response = RedirectResponse(url)
+    response.set_cookie(
+        key=OAUTH_COOKIE,
+        value=pending_cookie,
+        max_age=STATE_TTL_SECONDS,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",  # sent on Swiggy's top-level redirect back to us
+        path="/auth",
+    )
+    return response
+
+
+def _back_to_app(request: Request, flag: str) -> RedirectResponse:
+    """Land on the app (Vite on :5173 in dev, this host in prod) and drop the login cookie.
+
+    ?connected=1 skips the start screen after a fresh login; ?auth_error=1
+    shows it with a "try again" note instead of a raw error page.
+    """
+    base = (get_settings().frontend_url or "").rstrip("/")
+    response = RedirectResponse(f"{base}/?{flag}=1")
+    response.delete_cookie(
+        OAUTH_COOKIE, path="/auth", httponly=True,
+        secure=request.url.scheme == "https", samesite="lax",
+    )
+    return response
+
+
+def _current_user_is_connected() -> bool:
+    uid = current_uid_var.get()
+    rec = get_token_store().get(uid) if uid else None
+    return bool(rec and time.time() < rec.expires_at - 300)
 
 
 @app.get("/auth/callback")
 async def swiggy_callback(
+    request: Request,
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
 ):
     """OAuth redirect — exchanges code → saves token for the current user → redirects to app."""
-    if error:
-        log.warning("oauth_callback_error", oauth_error=error)
-        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
-    if not code:
-        log.warning("oauth_callback_missing_code")
-        raise HTTPException(status_code=400, detail="Missing authorization code")
+    if error or not code:
+        log.warning("oauth_callback_error", oauth_error=error or "missing_code")
+        return _back_to_app(request, "auth_error")
 
     auth = SwiggyAuthService()
     try:
-        await auth.exchange_code(code, state)
+        await auth.exchange_code(code, state, request.cookies.get(OAUTH_COOKIE))
         log.info("oauth_callback_success")
     except SwiggyAuthError as exc:
         log.warning("oauth_token_exchange_failed", error=str(exc))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # A replayed callback (refresh / back button) after a successful
+        # login fails here too — the user is fine, just open the app.
+        if _current_user_is_connected():
+            return _back_to_app(request, "connected")
+        return _back_to_app(request, "auth_error")
 
-    # Land users back on the app. In dev the frontend is on :5173; in prod
-    # it's served from this host. ?connected=1 tells the start screen to skip
-    # its "Continue" step right after a fresh login.
-    settings = get_settings()
-    base = (settings.frontend_url or "").rstrip("/")
-    return RedirectResponse(f"{base}/?connected=1")
+    return _back_to_app(request, "connected")
 
 
 @app.get("/auth/status")
