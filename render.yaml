@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: bhook
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt && cd frontend && npm ci && npm run build
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: ORDER_ENABLED
+        value: "false"
+      - key: FRONTEND_URL
+        value: https://bhook-m2wm.onrender.com
+      - key: SWIGGY_OAUTH_REDIRECT_URI
+        value: https://bhook-m2wm.onrender.com/auth/callback
+      - key: SWIGGY_FOOD_URL
+        value: https://mcp.swiggy.com/food
+      - key: SWIGGY_OAUTH_BASE_URL
+        value: https://mcp.swiggy.com
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SWIGGY_OAUTH_CLIENT_ID
+        sync: false
+      - key: SWIGGY_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: SWIGGY_ACCESS_TOKEN
+        sync: false
