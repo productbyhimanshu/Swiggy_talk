@@ -184,12 +184,13 @@ class SwiggyReadClient:
         next_offset = result.get("nextOffset") if isinstance(result, dict) else None
         return {"items": items, "has_more": has_more, "next_offset": next_offset}
 
-    async def get_food_cart(self) -> dict:
-        """View current cart + bill breakdown."""
-        result = await self._call("get_food_cart", {})
-        if isinstance(result, dict):
-            return result
-        return {}
+    async def get_food_cart(self, address_id: str, restaurant_name: str | None = None) -> dict:
+        """The user's live Swiggy cart (structuredContent). addressId is required."""
+        args: dict[str, Any] = {"addressId": address_id}
+        if restaurant_name:
+            args["restaurantName"] = restaurant_name
+        result = await self._call("get_food_cart", args, structured=True)
+        return result if isinstance(result, dict) else {}
 
     async def fetch_food_coupons(self) -> list[dict]:
         """
@@ -214,24 +215,42 @@ class SwiggyReadClient:
             return result
         return {}
 
-    async def get_food_orders(self) -> list[dict]:
-        """Order history — used by idempotency guard before retrying the ordering endpoint."""
-        result = await self._call("get_food_orders", {})
-        if isinstance(result, list):
-            return result
+    async def get_food_orders(self, address_id: str, active_only: bool = False) -> list[dict]:
+        """Order history (newest first). active_only=True → orders still in progress."""
+        args: dict[str, Any] = {"addressId": address_id}
+        if active_only:
+            args["activeOnly"] = True
+        result = await self._call("get_food_orders", args, structured=True)
         if isinstance(result, dict):
-            return result.get("orders", [])
+            return [o for o in result.get("orders", []) if isinstance(o, dict)]
         return []
 
     # ── Phase 9 Write Tools ───────────────────────────────────────────────────
 
-    async def update_food_cart(self, items: list[dict], restaurant_id: str, address_id: str) -> dict:
-        """Add, remove, or update items in the cart."""
-        return await self._call("update_food_cart", {
-            "items": items,
-            "restaurantId": restaurant_id,
-            "addressId": address_id
-        })
+    async def update_food_cart(
+        self,
+        items: list[dict],
+        restaurant_id: str,
+        address_id: str | None,
+        restaurant_name: str | None = None,
+    ) -> dict:
+        """Set item quantities in the Swiggy cart (quantity 0 removes an item).
+
+        items: [{"menu_item_id" | "itemId" | "id": str, "quantity": int}, ...]
+        Sent as Swiggy's `cartItems: [{menu_item_id, quantity}]`.
+        """
+        cart_items = []
+        for it in items:
+            item_id = it.get("menu_item_id") or it.get("itemId") or it.get("id")
+            if item_id:
+                cart_items.append({"menu_item_id": str(item_id), "quantity": int(it.get("quantity", 1))})
+        args: dict[str, Any] = {"restaurantId": restaurant_id, "cartItems": cart_items}
+        if address_id:
+            args["addressId"] = address_id
+        if restaurant_name:
+            args["restaurantName"] = restaurant_name
+        result = await self._call("update_food_cart", args, structured=True)
+        return result if isinstance(result, dict) else {}
 
     async def flush_food_cart(self) -> dict:
         """Clear the cart completely."""

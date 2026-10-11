@@ -1,17 +1,23 @@
-"""Phase 13 — review summary + user-confirmed place_food_order (COD only).
+"""Phase 13 — review summary + user-confirmed place_food_order (cash on delivery).
 
 Order safety (architecture §5, §19):
-  • Real `place_food_order` is guarded by ORDER_ENABLED (set in .env).
-    When either is false, the endpoint returns 403 with an explanation —
-    the same shape the frontend can render as a friendly message.
-  • Review endpoint re-validates the cart against Swiggy (single source of
-    truth) — never trusts the frontend cart state alone.
-  • Confirmed=True is mandatory; missing it returns 400 so accidental POSTs
-    can't trigger an order.
+  • Real `place_food_order` is guarded by ORDER_ENABLED (set in .env); when
+    false the endpoint returns 403 with an explanation the UI renders.
+  • Swiggy places whatever is in the user's *Swiggy* cart, so the only cart
+    that counts is the live one from get_food_cart. Before placing, the cart
+    is rebuilt from the items the user confirmed and must read back matching.
+  • Success means Swiggy returned an order id, or the order is visible in the
+    user's active orders. Anything else is reported as a failure.
+  • One placement at a time per session, no placement while an order from
+    the same restaurant is still active, and after an unconfirmed attempt the
+    session is held off briefly so a retry can't create a duplicate.
+  • confirmed=True is mandatory; missing it returns 400.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -28,6 +34,11 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/api/order", tags=["order"])
 
 _CART_CAP = 1000  # ₹ — Swiggy Builders Club cap (architecture §2)
+_RETRY_HOLDOFF_SECONDS = 180
+
+# Per-process guards (single worker today; move to Redis with more workers).
+_place_locks: dict[str, asyncio.Lock] = {}
+_unconfirmed_attempt_at: dict[str, float] = {}
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -45,10 +56,8 @@ class ClientCartItem(BaseModel):
 
 class ReviewRequest(BaseModel):
     session_id: str
-    # Client view of the cart. Used as a fallback when Swiggy's server-side
-    # `get_food_cart` returns empty — the cart-sync layer is best-effort
-    # (see phase_09/router.py) so the user shouldn't be dead-ended just
-    # because update_food_cart silently no-op'd.
+    # The basket the user sees. Pushed into Swiggy's cart before reading it
+    # back; shown (with placing disabled) only if Swiggy's cart can't be read.
     items: list[ClientCartItem] = Field(default_factory=list)
     restaurant_id: str | None = None
     restaurant_name: str | None = None
@@ -60,7 +69,7 @@ class PlaceOrderRequest(BaseModel):
         default=False,
         description="User must explicitly confirm via the Review screen CTA.",
     )
-    payment_method: str = Field(default="COD", description="COD only in v1.")
+    payment_method: str = Field(default="COD", description="Cash on delivery only in v1.")
     items: list[ClientCartItem] = Field(default_factory=list)
     restaurant_id: str | None = None
     restaurant_name: str | None = None
@@ -68,60 +77,74 @@ class PlaceOrderRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _coerce_cart(raw: Any) -> dict[str, Any]:
-    """Swiggy's cart endpoints sometimes return a `content` list rather than a
-    dict. Normalise to a dict so `_extract_cart_summary` can rely on .get()."""
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, list):
-        # Common shape: list of items only — wrap so the extractor still works
-        return {"items": raw}
-    return {}
+def _unwrap_cart(raw: Any) -> dict[str, Any]:
+    """get_food_cart's structuredContent keeps the cart under `data` (None when empty)."""
+    if not isinstance(raw, dict):
+        return {}
+    data = raw.get("data")
+    if isinstance(data, dict):
+        return data
+    return raw
 
 
-def _extract_cart_summary(cart: dict[str, Any]) -> dict[str, Any]:
-    """Normalise the Swiggy cart payload into the shape the Review UI expects."""
-    items_raw = cart.get("items") or cart.get("cart_items") or []
+def _first(d: dict, *keys: str, default: Any = None) -> Any:
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, ""):
+            return v
+    return default
+
+
+def _num(v: Any) -> float:
+    try:
+        return float(str(v).replace("₹", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _extract_cart_summary(raw: Any) -> dict[str, Any]:
+    """Normalise Swiggy's cart payload into the shape the Review UI expects."""
+    cart = _unwrap_cart(raw)
+    items_raw = _first(cart, "cartItems", "items", "cart_items", default=[]) or []
     items: list[dict] = []
     subtotal = 0.0
     for it in items_raw:
-        price = float(it.get("price") or it.get("finalPrice") or 0)
-        qty = int(it.get("quantity") or it.get("qty") or 1)
+        if not isinstance(it, dict):
+            continue
+        qty = int(_num(_first(it, "quantity", "qty", default=1)) or 1)
+        price = _num(_first(it, "price", "finalPrice", "final_price", "unitPrice", default=0))
         items.append({
-            "id":       it.get("itemId") or it.get("id"),
-            "name":     it.get("name") or it.get("item_name") or "Item",
+            "id":       str(_first(it, "menu_item_id", "itemId", "item_id", "id", default="")),
+            "name":     _first(it, "name", "item_name", "itemName", default="Item"),
             "price":    price,
             "quantity": qty,
-            "veg":      it.get("isVeg") if it.get("isVeg") is not None else it.get("veg"),
-            "image":    it.get("imageUrl") or it.get("image"),
+            "veg":      _first(it, "isVeg", "veg"),
+            "image":    _first(it, "imageUrl", "image"),
         })
         subtotal += price * qty
 
-    bill = cart.get("bill") or cart.get("billDetails") or {}
-    total = float(
-        bill.get("grandTotal")
-        or bill.get("total")
-        or cart.get("total")
-        or subtotal
-    )
-    delivery_fee = float(bill.get("deliveryFee") or bill.get("delivery") or 0)
-    taxes = float(bill.get("taxes") or bill.get("gst") or 0)
-    discount = float(bill.get("discount") or 0)
-
-    restaurant = cart.get("restaurant") or {}
+    bill = _first(cart, "bill", "billDetails", "bill_details", default={}) or {}
+    if not isinstance(bill, dict):
+        bill = {}
+    total = _num(_first(bill, "grandTotal", "toPay", "total", default=None)
+                 or _first(cart, "grandTotal", "toPay", "total", default=None)
+                 or subtotal)
+    restaurant = _first(cart, "restaurant", "restaurantDetails", default={}) or {}
+    if not isinstance(restaurant, dict):
+        restaurant = {}
+    status = restaurant.get("availabilityStatus")
     return {
         "restaurant": {
-            "id":   restaurant.get("restaurantId") or restaurant.get("id") or cart.get("restaurantId"),
-            "name": restaurant.get("name") or cart.get("restaurantName") or "—",
-            "eta":  restaurant.get("eta") or cart.get("eta"),
-            "open": restaurant.get("availabilityStatus", "OPEN") == "OPEN"
-                    if "availabilityStatus" in restaurant else True,
+            "id":   _first(restaurant, "restaurantId", "id") or _first(cart, "restaurantId", "restaurant_id"),
+            "name": _first(restaurant, "name") or _first(cart, "restaurantName", "restaurant_name", default="—"),
+            "eta":  _first(restaurant, "eta", "deliveryTime") or cart.get("eta"),
+            "open": status in (None, "OPEN"),
         },
         "items":        items,
         "subtotal":     round(subtotal, 2),
-        "delivery_fee": round(delivery_fee, 2),
-        "taxes":        round(taxes, 2),
-        "discount":     round(discount, 2),
+        "delivery_fee": round(_num(_first(bill, "deliveryFee", "delivery", default=0)), 2),
+        "taxes":        round(_num(_first(bill, "taxes", "gst", default=0)), 2),
+        "discount":     round(_num(_first(bill, "discount", default=0)), 2),
         "total":        round(total, 2),
         "currency":     "INR",
         "payment_methods": ["COD"],
@@ -129,11 +152,7 @@ def _extract_cart_summary(cart: dict[str, Any]) -> dict[str, Any]:
 
 
 def _summary_from_client(req: ReviewRequest | PlaceOrderRequest) -> dict[str, Any]:
-    """Build a summary from the client cart when Swiggy's server cart is empty.
-
-    Same shape as `_extract_cart_summary` so the rest of the review pipeline
-    is shape-agnostic.
-    """
+    """Display-only summary from the browser basket (placing stays disabled)."""
     items = [
         {
             "id":       it.id,
@@ -146,27 +165,64 @@ def _summary_from_client(req: ReviewRequest | PlaceOrderRequest) -> dict[str, An
         for it in req.items
     ]
     subtotal = sum(it["price"] * it["quantity"] for it in items)
-    delivery_fee = 28.0 if items else 0.0  # matches BasketSheet's fixed fee
-    total = subtotal + delivery_fee
-    rest_name = req.restaurant_name or (req.items[0].restaurant if req.items else "—")
-    rest_id   = req.restaurant_id or (req.items[0].restaurant_id if req.items else None)
     return {
         "restaurant": {
-            "id":   rest_id,
-            "name": rest_name,
+            "id":   req.restaurant_id or (req.items[0].restaurant_id if req.items else None),
+            "name": req.restaurant_name or (req.items[0].restaurant if req.items else "—"),
             "eta":  None,
             "open": True,
         },
         "items":        items,
         "subtotal":     round(subtotal, 2),
-        "delivery_fee": round(delivery_fee, 2),
+        "delivery_fee": 0.0,
         "taxes":        0.0,
         "discount":     0.0,
-        "total":        round(total, 2),
+        "total":        round(subtotal, 2),
         "currency":     "INR",
         "payment_methods": ["COD"],
         "_source": "client-fallback",
     }
+
+
+def _same_items(live: list[dict], confirmed: list[ClientCartItem]) -> bool:
+    want = {str(it.id): int(it.quantity) for it in confirmed}
+    have: dict[str, int] = {}
+    for it in live:
+        have[str(it["id"])] = have.get(str(it["id"]), 0) + int(it["quantity"])
+    return bool(want) and want == have
+
+
+async def _rebuild_swiggy_cart(
+    read: SwiggyReadClient, req: ReviewRequest | PlaceOrderRequest, address_id: str
+) -> None:
+    """Make Swiggy's cart exactly the confirmed basket: empty it, then add each item."""
+    restaurant_id = req.restaurant_id or (req.items[0].restaurant_id if req.items else None)
+    if not restaurant_id:
+        raise HTTPException(400, "Basket has no restaurant — add the dish again.")
+    await read.flush_food_cart()
+    await read.update_food_cart(
+        items=[{"menu_item_id": it.id, "quantity": it.quantity} for it in req.items],
+        restaurant_id=restaurant_id,
+        address_id=address_id,
+        restaurant_name=req.restaurant_name,
+    )
+
+
+def _order_id_from(result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    for scope in (result, result.get("data"), result.get("order")):
+        if isinstance(scope, dict):
+            oid = _first(scope, "orderId", "order_id")
+            if oid:
+                return str(oid)
+    return None
+
+
+def _matches_restaurant(order: dict, restaurant_id: Any, restaurant_name: Any) -> bool:
+    if restaurant_id and str(order.get("restaurantId")) == str(restaurant_id):
+        return True
+    return bool(restaurant_name) and order.get("restaurantName") == restaurant_name
 
 
 # ── /api/order/review ─────────────────────────────────────────────────────────
@@ -174,43 +230,38 @@ def _summary_from_client(req: ReviewRequest | PlaceOrderRequest) -> dict[str, An
 @router.post("/review")
 async def order_review(req: ReviewRequest) -> dict[str, Any]:
     """
-    Build the Review screen payload. Server-side source of truth: we fetch the
-    live Swiggy cart so the user never sees stale data on the final screen.
-
-    Re-runs the ₹1000 cap and restaurant OPEN gates so the Place-order CTA can
-    be disabled before the user even clicks it.
+    Build the Review screen from Swiggy's live cart, after pushing the user's
+    basket into it. If Swiggy's cart can't be confirmed, the basket is shown
+    with placing disabled and the reason listed under issues.
     """
     state = get_session(req.session_id)
     if not state.address_id:
         raise HTTPException(400, "No delivery address set — pick one and retry.")
 
     read = SwiggyReadClient()
-    raw_cart: Any = None
-    try:
-        raw_cart = await read.get_food_cart()
-    except Exception as exc:
-        log.warning("review_cart_fetch_failed_falling_back_to_client", error=str(exc))
-
-    summary = _extract_cart_summary(_coerce_cart(raw_cart))
-    # Fallback: Swiggy's server cart is empty/unavailable but the user's
-    # frontend has items — render from the client view so the user can still
-    # see the bill and confirm. The place-order endpoint re-syncs to Swiggy
-    # before placement.
-    if not summary["items"]:
-        if req.items:
-            summary = _summary_from_client(req)
-            log.info(
-                "review_using_client_cart_fallback",
-                session=req.session_id,
-                items=len(summary["items"]),
-            )
-        else:
-            raise HTTPException(400, "Cart is empty — add something first.")
-
-    # Re-validate gates against the live cart, not the client's view
+    summary: dict[str, Any] = {"items": []}
     issues: list[str] = []
+    try:
+        if req.items:
+            await _rebuild_swiggy_cart(read, req, state.address_id)
+        summary = _extract_cart_summary(
+            await read.get_food_cart(state.address_id, req.restaurant_name)
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("review_cart_sync_failed", error=str(exc))
+
+    if not summary["items"]:
+        if not req.items:
+            raise HTTPException(400, "Cart is empty — add something first.")
+        summary = _summary_from_client(req)
+        issues.append("Couldn't confirm your basket with Swiggy — try again in a moment.")
+    elif req.items and not _same_items(summary["items"], req.items):
+        issues.append("Swiggy's basket doesn't match yours — go back and re-add the dishes.")
+
     if summary["total"] > _CART_CAP:
-        issues.append(f"Cart total ₹{summary['total']:.0f} exceeds ₹{_CART_CAP} dev cap")
+        issues.append(f"Cart total ₹{summary['total']:.0f} exceeds ₹{_CART_CAP} cap")
     if not summary["restaurant"]["open"]:
         issues.append("Restaurant is currently closed")
 
@@ -234,6 +285,7 @@ async def order_review(req: ReviewRequest) -> dict[str, Any]:
         session=req.session_id,
         item_count=len(summary["items"]),
         total=summary["total"],
+        source=summary.get("_source", "swiggy"),
         can_place=summary["can_place_order"],
     )
     return summary
@@ -243,93 +295,116 @@ async def order_review(req: ReviewRequest) -> dict[str, Any]:
 
 @router.post("/place")
 async def place_order(req: PlaceOrderRequest) -> dict[str, Any]:
-    """
-    Place a real Swiggy COD order. The frontend Review CTA is the only path —
-    `confirmed` must be True. Cart and OPEN status are re-validated server-side
-    so the user can't bypass the cap by hand-crafting the request.
-    """
+    """Place a real Swiggy cash-on-delivery order for exactly the confirmed basket."""
     if not req.confirmed:
         raise HTTPException(400, "User must confirm order via the Review screen.")
-    if req.payment_method.upper() != "COD":
-        raise HTTPException(400, "Only COD payments supported in v1.")
+    if req.payment_method.upper() not in ("COD", "CASH"):
+        raise HTTPException(400, "Only cash on delivery is supported in v1.")
+    if not req.items:
+        raise HTTPException(400, "Cart is empty.")
+
+    lock = _place_locks.setdefault(req.session_id, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(409, "Your order is already being placed — hang on.")
+    async with lock:
+        return await _place_locked(req)
+
+
+async def _place_locked(req: PlaceOrderRequest) -> dict[str, Any]:
+    last = _unconfirmed_attempt_at.get(req.session_id)
+    if last and time.time() - last < _RETRY_HOLDOFF_SECONDS:
+        raise HTTPException(
+            409,
+            "Your last attempt wasn't confirmed by Swiggy. Check your Swiggy app "
+            "before trying again (wait a couple of minutes).",
+        )
 
     state = get_session(req.session_id)
     if not state.address_id:
         raise HTTPException(400, "No delivery address set.")
-
+    address_id = state.address_id
     read = SwiggyReadClient()
 
-    # Best-effort re-sync: push the client cart into Swiggy so the live cart
-    # matches what the user just confirmed. We don't fail on sync errors —
-    # the gated place_food_order below is the authoritative step.
-    if req.items and req.restaurant_id:
-        try:
-            await read.update_food_cart(
-                items=[{"itemId": it.id, "quantity": it.quantity} for it in req.items],
-                restaurant_id=req.restaurant_id,
-                address_id=state.address_id,
-            )
-        except Exception as exc:
-            log.warning("place_order_resync_failed", error=str(exc))
-
-    raw_cart: Any = None
+    # 1. Swiggy's cart must be exactly what the user confirmed.
     try:
-        raw_cart = await read.get_food_cart()
+        await _rebuild_swiggy_cart(read, req, address_id)
+        summary = _extract_cart_summary(await read.get_food_cart(address_id, req.restaurant_name))
+    except HTTPException:
+        raise
     except Exception as exc:
-        log.warning("place_order_cart_fetch_failed", error=str(exc))
-
-    summary = _extract_cart_summary(_coerce_cart(raw_cart))
-    if not summary["items"] and req.items:
-        summary = _summary_from_client(req)
-    if not summary["items"]:
-        raise HTTPException(400, "Cart is empty.")
+        log.warning("place_order_cart_sync_failed", error=str(exc))
+        raise HTTPException(502, "Couldn't update your Swiggy basket — nothing was ordered. Try again.")
+    if not _same_items(summary["items"], req.items):
+        log.warning("place_order_cart_mismatch", live=len(summary["items"]), confirmed=len(req.items))
+        raise HTTPException(409, "Couldn't confirm your basket with Swiggy — nothing was ordered.")
     if summary["total"] > _CART_CAP:
-        raise HTTPException(400, f"Cart total exceeds ₹{_CART_CAP} dev cap.")
+        raise HTTPException(400, f"Cart total exceeds ₹{_CART_CAP} cap.")
     if not summary["restaurant"]["open"]:
         raise HTTPException(409, "Restaurant just went offline — please pick again.")
 
-    client = SwiggyApiClient()
+    rest_id = summary["restaurant"]["id"] or req.restaurant_id
+    rest_name = summary["restaurant"]["name"] if summary["restaurant"]["name"] != "—" else req.restaurant_name
+
+    # 2. Don't stack a second order on one that's still in progress.
     try:
-        result = await client.place_food_order(payment_method="COD")
+        active_before = await read.get_food_orders(address_id, active_only=True)
+    except Exception as exc:
+        log.warning("place_order_active_check_failed", error=str(exc))
+        raise HTTPException(502, "Couldn't check your active Swiggy orders — nothing was ordered.")
+    if any(_matches_restaurant(o, rest_id, rest_name) for o in active_before):
+        raise HTTPException(409, f"You already have an active order from {rest_name}. Check Swiggy first.")
+    known_ids = {str(o.get("orderId")) for o in active_before}
+
+    # 3. Place it.
+    try:
+        result = await SwiggyApiClient().place_food_order(address_id=address_id, payment_method="Cash")
     except OrderDisabledError as exc:
-        # Translate guard into a real HTTP response the UI can render gracefully
         log.info("place_order_blocked_by_guard", reason=str(exc))
         raise HTTPException(403, str(exc))
     except Exception as exc:
         log.error("place_order_failed", error=str(exc))
-        raise HTTPException(502, f"Swiggy rejected the order: {exc}")
+        raise HTTPException(502, f"Swiggy didn't accept the order — nothing was ordered. {exc}")
 
-    # Persist to long-term memory so "order this again" can work later.
+    # 4. Only a real Swiggy order counts as success.
+    order_id = _order_id_from(result)
+    if not order_id:
+        try:
+            active_after = await read.get_food_orders(address_id, active_only=True)
+        except Exception:
+            active_after = []
+        new = [o for o in active_after
+               if str(o.get("orderId")) not in known_ids and _matches_restaurant(o, rest_id, rest_name)]
+        if new:
+            order_id = str(new[0].get("orderId"))
+    if not order_id:
+        _unconfirmed_attempt_at[req.session_id] = time.time()
+        log.error("place_order_unconfirmed", response=str(result)[:500])
+        raise HTTPException(
+            502,
+            "Swiggy didn't confirm this order. Check your Swiggy app before trying again.",
+        )
+
+    _unconfirmed_attempt_at.pop(req.session_id, None)
     try:
         from phases.phase_00.services import memory as user_memory
         user_memory.record_order(
-            restaurant_id=summary["restaurant"]["id"],
-            restaurant_name=summary["restaurant"]["name"],
+            restaurant_id=rest_id,
+            restaurant_name=rest_name,
             items=[{**it, "qty": it.get("quantity", 1)} for it in summary["items"]],
             total=summary["total"],
         )
     except Exception as exc:
         log.warning("memory_record_order_failed", error=str(exc))
 
-    order_id = None
-    if isinstance(result, dict):
-        order_id = result.get("orderId") or result.get("order_id") or result.get("id")
-
-    log.info(
-        "order_placed",
-        session=req.session_id,
-        order_id=order_id,
-        total=summary["total"],
-        restaurant=summary["restaurant"]["name"],
-    )
+    log.info("order_placed", session=req.session_id, order_id=order_id,
+             total=summary["total"], restaurant=rest_name)
     return {
-        "ok":        True,
-        "order_id":  order_id,
-        "total":     summary["total"],
-        "eta":       summary["restaurant"]["eta"],
-        "items":     summary["items"],
-        "restaurant": summary["restaurant"],
-        "raw":       result,
+        "ok":         True,
+        "order_id":   order_id,
+        "total":      summary["total"],
+        "eta":        summary["restaurant"]["eta"],
+        "items":      summary["items"],
+        "restaurant": {**summary["restaurant"], "id": rest_id, "name": rest_name},
     }
 
 

@@ -229,6 +229,6 @@ async def test_get_food_cart_returns_dict():
         return {"items": [], "total": 0}
 
     client.set_tool_override("get_food_cart", cart_data)
-    result = await client.get_food_cart()
+    result = await client.get_food_cart("addr1")
     assert isinstance(result, dict)
     assert result["total"] == 0

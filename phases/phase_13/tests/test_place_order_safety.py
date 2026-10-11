@@ -1,0 +1,164 @@
+"""Placing an order only reports success when Swiggy really created one."""
+
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from phases.phase_13.routes import place_order as po
+
+
+class FakeRead:
+    def __init__(self, live_items, active_before=(), active_after=()):
+        self.live_items = live_items
+        self.active = [list(active_before), list(active_after)]
+        self.calls: list = []
+
+    async def flush_food_cart(self):
+        self.calls.append("flush")
+
+    async def update_food_cart(self, items, restaurant_id, address_id, restaurant_name=None):
+        self.calls.append(("update", items, restaurant_id))
+
+    async def get_food_cart(self, address_id, restaurant_name=None):
+        if self.live_items is None:
+            return {"statusCode": 0, "data": None}
+        return {"data": {"cartItems": self.live_items, "restaurantId": "r1",
+                         "restaurantName": "Chhabra's", "bill": {"toPay": 248}}}
+
+    async def get_food_orders(self, address_id, active_only=False):
+        return self.active.pop(0) if self.active else []
+
+
+class FakeApi:
+    def __init__(self, result=None, exc=None):
+        self.result, self.exc, self.calls = result, exc, 0
+
+    async def place_food_order(self, address_id, payment_method="Cash"):
+        self.calls += 1
+        assert payment_method == "Cash" and address_id == "addr1"
+        if self.exc:
+            raise self.exc
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def wiring(monkeypatch):
+    po._place_locks.clear()
+    po._unconfirmed_attempt_at.clear()
+    monkeypatch.setattr(po, "get_session", lambda sid: SimpleNamespace(address_id="addr1"))
+    recorded: list = []
+    from phases.phase_00.services import memory
+    monkeypatch.setattr(memory, "record_order", lambda **kw: recorded.append(kw))
+    yield recorded
+
+
+def _install(monkeypatch, read, api):
+    monkeypatch.setattr(po, "SwiggyReadClient", lambda: read)
+    monkeypatch.setattr(po, "SwiggyApiClient", lambda: api)
+
+
+def _req(**kw):
+    base = dict(session_id="s1", confirmed=True, restaurant_id="r1", restaurant_name="Chhabra's",
+                items=[po.ClientCartItem(id="111", name="Paneer", price=248, quantity=1)])
+    return po.PlaceOrderRequest(**{**base, **kw})
+
+
+LIVE = [{"menu_item_id": "111", "name": "Paneer", "price": 248, "quantity": 1}]
+
+
+@pytest.mark.asyncio
+async def test_success_requires_order_id(monkeypatch, wiring):
+    read, api = FakeRead(LIVE), FakeApi({"orderId": "50999"})
+    _install(monkeypatch, read, api)
+    out = await po.place_order(_req())
+    assert out["ok"] and out["order_id"] == "50999"
+    assert read.calls[0] == "flush" and read.calls[1][1] == [{"menu_item_id": "111", "quantity": 1}]
+    assert len(wiring) == 1  # memory recorded only on real success
+
+
+@pytest.mark.asyncio
+async def test_no_order_id_and_no_new_active_order_is_failure(monkeypatch, wiring):
+    read, api = FakeRead(LIVE), FakeApi({"statusMessage": "something odd"})
+    _install(monkeypatch, read, api)
+    with pytest.raises(HTTPException) as e:
+        await po.place_order(_req())
+    assert e.value.status_code == 502 and "didn't confirm" in e.value.detail
+    assert wiring == []
+    # a quick retry is held off so it can't create a duplicate
+    with pytest.raises(HTTPException) as e2:
+        await po.place_order(_req())
+    assert e2.value.status_code == 409 and api.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_id_but_new_active_order_counts(monkeypatch, wiring):
+    after = [{"orderId": "777", "restaurantId": "r1", "restaurantName": "Chhabra's"}]
+    read, api = FakeRead(LIVE, active_before=[], active_after=after), FakeApi({})
+    _install(monkeypatch, read, api)
+    out = await po.place_order(_req())
+    assert out["order_id"] == "777"
+
+
+@pytest.mark.asyncio
+async def test_cart_mismatch_never_places(monkeypatch):
+    wrong = [{"menu_item_id": "999", "name": "Other", "price": 100, "quantity": 2}]
+    read, api = FakeRead(wrong), FakeApi({"orderId": "1"})
+    _install(monkeypatch, read, api)
+    with pytest.raises(HTTPException) as e:
+        await po.place_order(_req())
+    assert e.value.status_code == 409 and api.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_empty_swiggy_cart_never_places(monkeypatch):
+    read, api = FakeRead(None), FakeApi({"orderId": "1"})
+    _install(monkeypatch, read, api)
+    with pytest.raises(HTTPException):
+        await po.place_order(_req())
+    assert api.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_existing_active_order_from_same_restaurant_blocks(monkeypatch):
+    active = [{"orderId": "5", "restaurantId": "r1", "restaurantName": "Chhabra's"}]
+    read, api = FakeRead(LIVE, active_before=active), FakeApi({"orderId": "6"})
+    _install(monkeypatch, read, api)
+    with pytest.raises(HTTPException) as e:
+        await po.place_order(_req())
+    assert e.value.status_code == 409 and api.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_double_click_rejected_while_placing(monkeypatch):
+    read, api = FakeRead(LIVE), FakeApi({"orderId": "1"})
+    _install(monkeypatch, read, api)
+    lock = po._place_locks.setdefault("s1", po.asyncio.Lock())
+    await lock.acquire()
+    try:
+        with pytest.raises(HTTPException) as e:
+            await po.place_order(_req())
+        assert e.value.status_code == 409 and api.calls == 0
+    finally:
+        lock.release()
+
+
+@pytest.mark.asyncio
+async def test_review_disables_placing_when_swiggy_cart_unconfirmed(monkeypatch):
+    read = FakeRead(None)
+    _install(monkeypatch, read, FakeApi())
+    req = po.ReviewRequest(session_id="s1", restaurant_id="r1", restaurant_name="Chhabra's",
+                           items=[po.ClientCartItem(id="111", name="Paneer", price=248)])
+    out = await po.order_review(req)
+    assert out["can_place_order"] is False and out["issues"]
+    assert out["_source"] == "client-fallback"
+
+
+@pytest.mark.asyncio
+async def test_review_uses_live_cart_when_it_matches(monkeypatch):
+    read = FakeRead(LIVE)
+    _install(monkeypatch, read, FakeApi())
+    req = po.ReviewRequest(session_id="s1", restaurant_id="r1", restaurant_name="Chhabra's",
+                           items=[po.ClientCartItem(id="111", name="Paneer", price=248)])
+    out = await po.order_review(req)
+    assert out["issues"] == [] and out["total"] == 248 and "_source" not in out

@@ -96,15 +96,20 @@ class SwiggyApiClient:
 
     async def place_food_order(
         self,
-        payment_method: str = "COD",
-        **extra_args: Any,
+        address_id: str,
+        payment_method: str = "Cash",
+        note_to_restaurant: str | None = None,
     ) -> Any:
-        """
-        Place a real food order — gated by ORDER_ENABLED + EVAL_SUITE_PASSED.
+        """Place a real food order (gated by ORDER_ENABLED). Returns structuredContent.
+
+        Swiggy places whatever is in the user's Swiggy cart — callers must
+        verify that cart first. Cash on delivery is `paymentMethod="Cash"`.
         """
         assert_orders_enabled()
-        args = {"payment_method": payment_method, **extra_args}
-        return await self._invoke_tool(ORDER_TOOL, args)
+        args: dict[str, Any] = {"addressId": address_id, "paymentMethod": payment_method}
+        if note_to_restaurant:
+            args["noteToRestaurant"] = note_to_restaurant
+        return await self._invoke_tool(ORDER_TOOL, args, structured=True)
 
     async def get_addresses(self) -> Any:
         """Convenience wrapper for Phase 0 smoke test."""
@@ -169,6 +174,14 @@ class SwiggyApiClient:
 
         # Tool-level success/data envelope (per Builders docs)
         if isinstance(result, dict):
+            if result.get("isError") is True:
+                # MCP reports tool failures (validation, rejected orders, empty
+                # carts) as a normal result flagged isError. 422 = don't retry.
+                blocks = result.get("content") or []
+                msg = " ".join(
+                    b.get("text", "") for b in blocks if isinstance(b, dict)
+                ).strip() or "unknown error"
+                raise SwiggyApiError(f"Tool {name} failed: {msg[:500]}", status_code=422)
             if result.get("success") is False:
                 error = result.get("error", {})
                 msg = (

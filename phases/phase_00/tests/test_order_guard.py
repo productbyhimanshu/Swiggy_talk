@@ -23,4 +23,4 @@ async def test_call_tool_blocks_place_food_order(clean_env):
 async def test_place_food_order_raises_when_disabled(clean_env):
     client = SwiggyApiClient()
     with pytest.raises(OrderDisabledError):
-        await client.place_food_order()
+        await client.place_food_order(address_id="addr1")
