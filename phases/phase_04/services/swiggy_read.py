@@ -25,7 +25,9 @@ from phases.phase_04.utils.parse_swiggy_content import (
     parse_addresses,
     parse_addresses_structured,
     parse_menu,
+    parse_menu_structured,
     parse_restaurants,
+    parse_restaurants_structured,
 )
 
 log = get_logger(__name__)
@@ -121,15 +123,15 @@ class SwiggyReadClient:
         result = await self._call(
             "search_restaurants",
             {"query": query, "addressId": address_id},
+            structured=True,
         )
-        # Swiggy returns MCP content blocks: [{"type":"text","text":"Found 10..."}]
-        # Parse into structured restaurant dicts the scorer/UI can consume.
+        if isinstance(result, dict):
+            return parse_restaurants_structured(result)
+        # Fallback: text-only responses
         if isinstance(result, list):
             if result and isinstance(result[0], dict) and result[0].get("type") == "text":
                 return parse_restaurants(result)
-            return result  # already structured (future-proof)
-        if isinstance(result, dict):
-            return result.get("restaurants", [])
+            return result
         return []
 
     async def get_restaurant_menu(self, restaurant_id: str, address_id: str | None = None) -> dict:
@@ -151,9 +153,11 @@ class SwiggyReadClient:
         args: dict[str, Any] = {"restaurantId": restaurant_id}
         if address_id:
             args["addressId"] = address_id
-        result = await self._call("get_restaurant_menu", args)
-        if isinstance(result, list):
-            parsed = parse_menu(result)
+        result = await self._call("get_restaurant_menu", args, structured=True)
+        if isinstance(result, dict) and "categories" in result:
+            parsed = parse_menu_structured(result)
+        elif isinstance(result, list):
+            parsed = parse_menu(result)  # fallback: text-only response
         elif isinstance(result, dict):
             parsed = result
         else:
@@ -197,25 +201,32 @@ class SwiggyReadClient:
         result = await self._call("get_food_cart", args, structured=True)
         return result if isinstance(result, dict) else {}
 
-    async def fetch_food_coupons(self) -> list[dict]:
+    async def fetch_food_coupons(self, restaurant_id: str, address_id: str) -> list[dict]:
         """
         List available coupons — filters out non-COD coupons.
 
         architecture §2: COD only in v1. Filter coupons requiring online payment.
+        Swiggy groups coupons as coupon_sections[].coupons[].
         """
-        result = await self._call("fetch_food_coupons", {})
+        result = await self._call(
+            "fetch_food_coupons", {"restaurantId": restaurant_id, "addressId": address_id},
+            structured=True,
+        )
         raw: list[dict] = []
-        if isinstance(result, list):
-            raw = result
-        elif isinstance(result, dict):
-            raw = result.get("coupons", [])
+        if isinstance(result, dict):
+            for section in result.get("coupon_sections") or []:
+                if isinstance(section, dict):
+                    raw.extend(c for c in section.get("coupons") or [] if isinstance(c, dict))
+            raw.extend(c for c in result.get("coupons") or [] if isinstance(c, dict))
+        elif isinstance(result, list):
+            raw = [c for c in result if isinstance(c, dict)]
 
         # Keep only COD-compatible coupons
         return [c for c in raw if _is_cod_compatible(c)]
 
     async def track_food_order(self, order_id: str) -> dict:
-        """Track order status — read-only."""
-        result = await self._call("track_food_order", {"orderId": order_id})
+        """Track order status — read-only. Swiggy: {orders: [...], statusMessage}."""
+        result = await self._call("track_food_order", {"orderId": order_id}, structured=True)
         if isinstance(result, dict):
             return result
         return {}
@@ -239,31 +250,49 @@ class SwiggyReadClient:
         address_id: str | None,
         restaurant_name: str | None = None,
     ) -> dict:
-        """Set item quantities in the Swiggy cart (quantity 0 removes an item).
+        """Make the Swiggy cart exactly `items` (Swiggy replaces the whole cart).
 
         items: [{"menu_item_id" | "itemId" | "id": str, "quantity": int}, ...]
-        Sent as Swiggy's `cartItems: [{menu_item_id, quantity}]`.
+        To remove a dish, send the basket without it — Swiggy rejects
+        quantity 0 with a 500. An empty basket flushes the cart.
+
+        Raises SwiggyApiError when Swiggy rejects the update without flagging
+        isError (statusCode != 0, e.g. INVALID_ITEM_IDS_IN_REQUEST).
         """
         cart_items = []
         for it in items:
             item_id = it.get("menu_item_id") or it.get("itemId") or it.get("id")
-            if item_id:
-                cart_items.append({"menu_item_id": str(item_id), "quantity": int(it.get("quantity", 1))})
+            qty = int(it.get("quantity", 1))
+            if item_id and qty > 0:
+                cart_items.append({"menu_item_id": str(item_id), "quantity": qty})
+        if not cart_items:
+            await self.flush_food_cart()
+            return {"statusCode": 0, "data": None}
         args: dict[str, Any] = {"restaurantId": restaurant_id, "cartItems": cart_items}
         if address_id:
             args["addressId"] = address_id
         if restaurant_name:
             args["restaurantName"] = restaurant_name
         result = await self._call("update_food_cart", args, structured=True)
-        return result if isinstance(result, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        if result.get("statusCode") not in (None, 0) or result.get("errorCodes"):
+            raise SwiggyApiError(
+                "Swiggy rejected the cart update: "
+                f"{result.get('titleMessage') or result.get('statusMessage') or 'unknown reason'}",
+                status_code=422,
+            )
+        return result
 
     async def flush_food_cart(self) -> dict:
         """Clear the cart completely."""
         return await self._call("flush_food_cart", {})
 
-    async def apply_food_coupon(self, coupon_code: str) -> dict:
+    async def apply_food_coupon(self, coupon_code: str, address_id: str) -> dict:
         """Apply a coupon to the current cart."""
-        return await self._call("apply_food_coupon", {"couponCode": coupon_code})
+        return await self._call(
+            "apply_food_coupon", {"couponCode": coupon_code, "addressId": address_id},
+            structured=True,
+        )
 
     # ── Retry core ─────────────────────────────────────────────────────────────
 

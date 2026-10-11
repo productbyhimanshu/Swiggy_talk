@@ -114,6 +114,39 @@ def test_rank_dish_query_keeps_same_dish_from_different_places():
     assert len(out) == 5 and len({d["restaurantId"] for d in out}) == 5
 
 
+def test_gibberish_hits_dropped_but_spelling_variants_kept():
+    # Swiggy's search_menu("xqzzvplk") really returns milks.
+    milk = [("xqzzvplk", _dish(str(i), n, f"r{i}")) for i, n in enumerate(["Rose Milk", "Oat Milk"])]
+    assert orch._rank_dishes(milk, UserIntent(search_query="xqzzvplk"), {}, variety=False) == []
+    variant = [("dal makhani", _dish("1", "Daal Makhni", "r1"))]
+    assert [d["name"] for d in orch._rank_dishes(variant, UserIntent(search_query="veg food"), {}, variety=True)] \
+        == ["Daal Makhni"]
+
+
+class _MostlyNonVegClient:
+    """Like the live vegFilter=1 response: veg items mixed with unflagged chicken."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def search_menu(self, query, address_id, veg_only=False, offset=None):
+        idx = (offset or 0) // 10
+        self.calls += 1
+        items = [_dish(f"{idx}-{j}", "Chicken Biryani" if j else "Veg Biryani", f"r{idx}{j}",
+                       veg=(j == 0)) for j in range(10)]
+        return {"items": items, "has_more": True, "next_offset": (idx + 1) * 10}
+
+
+@pytest.mark.asyncio
+async def test_veg_query_keeps_paging_because_veg_filter_does_not_filter():
+    client = _MostlyNonVegClient()
+    intent = UserIntent(search_query="biryani", veg_nonveg="veg")
+    hits = await orch._search_dishes(client, ["biryani"], intent, "addr")
+    assert client.calls == orch._MAX_DISH_PAGES
+    out = orch._rank_dishes(hits, intent, {}, variety=False)
+    assert out and all(d["veg"] for d in out)
+
+
 def test_rank_drops_over_budget_and_closed():
     rest = {"r1": {"rating": 4.5, "availabilityStatus": "CLOSED"}}
     hits = [("pizza", _dish("1", "Pizza", "r1", price=200)),

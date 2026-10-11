@@ -1,102 +1,116 @@
-"""Eval suite for Phase 9 Cart sync and rules."""
+"""Phase 9 — the browser basket is mirrored into Swiggy's (replace-whole-cart) API."""
+
+import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from unittest.mock import patch, AsyncMock
 from fastapi import HTTPException
 
-from phases.phase_09.router import add_to_cart, remove_from_cart, CartRequest, CartItem
-from phases.phase_07.session import get_session, clear_session
 from phases.phase_04.services.swiggy_read import SwiggyUnavailableError
+from phases.phase_07.session import clear_session, get_session
+from phases.phase_09 import router as cart
+from phases.phase_09.router import CartSyncRequest, SyncItem, sync_cart
+
+
+def _live(*pairs):
+    """update_food_cart response with the given (id, qty) items kept by Swiggy."""
+    return {"statusCode": 0, "data": {"items": [{"menu_item_id": int(i), "quantity": q} for i, q in pairs],
+                                      "pricing": {"to_pay": 470}}}
 
 
 @pytest.fixture
-def clean_session():
-    clear_session("test_session")
-    session = get_session("test_session")
-    session.address_id = "test_address"
-    yield session
-    clear_session("test_session")
+def session():
+    cart._sync_locks.clear()
+    cart._last_seq.clear()
+    clear_session("cart_s")
+    s = get_session("cart_s")
+    s.address_id = "addr1"
+    yield s
+    clear_session("cart_s")
 
 
-@pytest.fixture
-def base_req():
-    return CartRequest(
-        session_id="test_session",
-        item=CartItem(id="123", name="Pizza", price=250.0, restaurant_id="r1"),
-        quantity=1
-    )
-
-
-@pytest.mark.asyncio
-@patch("phases.phase_09.router.SwiggyReadClient.update_food_cart")
-async def test_add_remove_updates_state(mock_update, base_req, clean_session):
-    """9.E1: add/remove updates cart_has_items."""
-    mock_update.return_value = {"cart": {"total": 250}}
-    
-    assert not clean_session.cart_has_items
-    
-    await add_to_cart(base_req)
-    assert clean_session.cart_has_items
-    assert clean_session.cart_restaurant_id == "r1"
-    
-    mock_update.return_value = {"cart": {"total": 0}}
-    await remove_from_cart(base_req)
-    assert not clean_session.cart_has_items
-    assert clean_session.cart_restaurant_id is None
+def _req(*items, seq=1, rest="r1"):
+    return CartSyncRequest(session_id="cart_s", seq=seq, restaurant_id=rest, restaurant_name="R",
+                           items=[SyncItem(id=i, quantity=q, price=p) for i, q, p in items])
 
 
 @pytest.mark.asyncio
-@patch("phases.phase_09.router.SwiggyReadClient.update_food_cart")
-async def test_api_500_triggers_rollback(mock_update, base_req, clean_session):
-    """9.E2: API 500 throws HTTP 500 causing frontend rollback."""
-    mock_update.side_effect = Exception("Swiggy API Error")
-    
-    with pytest.raises(HTTPException) as exc:
-        await add_to_cart(base_req)
-        
-    assert exc.value.status_code == 500
-    # State should remain untouched since it failed
-    assert not clean_session.cart_has_items
+async def test_sends_whole_basket_every_time(session):
+    with patch.object(cart.SwiggyReadClient, "update_food_cart",
+                      new=AsyncMock(return_value=_live(("1", 1), ("2", 2)))) as upd:
+        out = await sync_cart(_req(("1", 1, 100), ("2", 2, 50)))
+    sent = upd.call_args.kwargs["items"]
+    assert sent == [{"menu_item_id": "1", "quantity": 1}, {"menu_item_id": "2", "quantity": 2}]
+    assert out["ok"] and out["missing"] == [] and out["to_pay"] == 470
+    assert session.cart_has_items and session.cart_restaurant_id == "r1"
 
 
 @pytest.mark.asyncio
-@patch("phases.phase_09.router.SwiggyReadClient.flush_food_cart")
-@patch("phases.phase_09.router.SwiggyReadClient.update_food_cart")
-async def test_restaurant_switch_triggers_flush(mock_update, mock_flush, base_req, clean_session):
-    """9.E3: restaurant switch triggers flush."""
-    mock_update.return_value = {"cart": {"total": 250}}
-    
-    clean_session.cart_has_items = True
-    clean_session.cart_restaurant_id = "r_old"
-    
-    await add_to_cart(base_req)
-    
-    mock_flush.assert_called_once()
-    assert clean_session.cart_restaurant_id == "r1"
+async def test_removing_a_dish_sends_the_rest_not_quantity_zero(session):
+    with patch.object(cart.SwiggyReadClient, "update_food_cart",
+                      new=AsyncMock(return_value=_live(("2", 1)))) as upd:
+        await sync_cart(_req(("1", 0, 100), ("2", 1, 50)))
+    assert upd.call_args.kwargs["items"] == [{"menu_item_id": "2", "quantity": 1}]
 
 
 @pytest.mark.asyncio
-@patch("phases.phase_09.router.SwiggyReadClient.update_food_cart")
-async def test_cart_over_1000_blocked(mock_update, base_req, clean_session):
-    """9.E4: cart > 1000 blocked immediately."""
-    base_req.item.price = 1200.0
-    
-    with pytest.raises(HTTPException) as exc:
-        await add_to_cart(base_req)
-        
-    assert exc.value.status_code == 400
-    assert "₹1000" in exc.value.detail
-    mock_update.assert_not_called()
+async def test_empty_basket_flushes(session):
+    session.cart_has_items = True
+    with patch.object(cart.SwiggyReadClient, "flush_food_cart", new=AsyncMock()) as flush, \
+         patch.object(cart.SwiggyReadClient, "update_food_cart", new=AsyncMock()) as upd:
+        out = await sync_cart(_req())
+    flush.assert_awaited_once()
+    upd.assert_not_called()
+    assert out["ok"] and not session.cart_has_items and session.cart_restaurant_id is None
 
 
 @pytest.mark.asyncio
-@patch("phases.phase_09.router.SwiggyReadClient.update_food_cart")
-async def test_cart_timeout_raises_unavailable(mock_update, base_req, clean_session):
-    """9.E5: update_cart timeout raises SwiggyUnavailableError."""
-    mock_update.side_effect = SwiggyUnavailableError("Timeout")
-    
-    with pytest.raises(HTTPException) as exc:
-        await add_to_cart(base_req)
-        
-    assert exc.value.status_code == 500
-    assert "Timeout" in exc.value.detail
+async def test_items_swiggy_dropped_are_reported(session):
+    with patch.object(cart.SwiggyReadClient, "update_food_cart",
+                      new=AsyncMock(return_value=_live(("1", 1)))):
+        out = await sync_cart(_req(("1", 1, 100), ("2", 1, 50)))
+    assert out["ok"] is False and out["missing"] == ["2"]
+
+
+@pytest.mark.asyncio
+async def test_swiggy_failure_is_502_and_state_untouched(session):
+    with patch.object(cart.SwiggyReadClient, "update_food_cart",
+                      new=AsyncMock(side_effect=SwiggyUnavailableError("Timeout"))):
+        with pytest.raises(HTTPException) as e:
+            await sync_cart(_req(("1", 1, 100)))
+    assert e.value.status_code == 502 and "Timeout" in e.value.detail
+    assert not session.cart_has_items
+
+
+@pytest.mark.asyncio
+async def test_over_1000_blocked_before_calling_swiggy(session):
+    with patch.object(cart.SwiggyReadClient, "update_food_cart", new=AsyncMock()) as upd:
+        with pytest.raises(HTTPException) as e:
+            await sync_cart(_req(("1", 1, 1200)))
+    assert e.value.status_code == 400 and "₹1000" in e.value.detail
+    upd.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_older_request_arriving_late_is_ignored(session):
+    with patch.object(cart.SwiggyReadClient, "update_food_cart",
+                      new=AsyncMock(return_value=_live(("1", 3)))) as upd:
+        await sync_cart(_req(("1", 3, 100), seq=5))
+        out = await sync_cart(_req(("1", 1, 100), seq=4))
+    assert out.get("stale") is True and upd.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_syncs_are_serialised(session):
+    calls = []
+
+    async def slow_update(self, **kw):
+        calls.append(("start", kw["items"][0]["quantity"]))
+        await asyncio.sleep(0.01)
+        calls.append(("end", kw["items"][0]["quantity"]))
+        return _live(("1", kw["items"][0]["quantity"]))
+
+    with patch.object(cart.SwiggyReadClient, "update_food_cart", new=slow_update):
+        await asyncio.gather(sync_cart(_req(("1", 1, 100), seq=1)),
+                             sync_cart(_req(("1", 2, 100), seq=2)))
+    assert calls == [("start", 1), ("end", 1), ("start", 2), ("end", 2)]

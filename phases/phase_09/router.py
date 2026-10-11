@@ -1,106 +1,98 @@
-"""Phase 9 Cart API Router."""
+"""Phase 9 — cart sync.
 
-import logging
+Swiggy's update_food_cart REPLACES the whole cart with the items sent (and
+rejects quantity 0 with a 500), so the browser sends its entire basket on
+every change and this endpoint mirrors it into Swiggy:
+  • empty basket → flush_food_cart
+  • otherwise   → update_food_cart(all items), then report which items
+                  Swiggy didn't keep (e.g. no longer available)
+Requests carry a client sequence number; an older request that arrives after
+a newer one is ignored so rapid +/− taps can't leave Swiggy with a stale cart.
+"""
+
+import asyncio
+
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from phases.phase_00.logging_setup import get_logger
-from phases.phase_04.services.swiggy_read import SwiggyReadClient
-from phases.phase_07.session import get_session
+from phases.phase_00.services.swiggy_api import SwiggyApiError
+from phases.phase_04.services.swiggy_read import SwiggyReadClient, SwiggyUnavailableError
+from phases.phase_07.session import get_session, save_session
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/api/cart", tags=["cart"])
 
+_CART_CAP = 1000  # ₹ — Swiggy Builders Club cap
 
-class CartItem(BaseModel):
+# Per-process (single worker today).
+_sync_locks: dict[str, asyncio.Lock] = {}
+_last_seq: dict[str, int] = {}
+
+
+class SyncItem(BaseModel):
     id: str
-    name: str
-    price: float
-    restaurant_id: str
-
-
-class CartRequest(BaseModel):
-    session_id: str
-    item: CartItem
     quantity: int = 1
+    price: float = 0
+    name: str = ""
 
 
-@router.post("/add")
-async def add_to_cart(req: CartRequest):
+class CartSyncRequest(BaseModel):
+    session_id: str
+    seq: int = 0
+    restaurant_id: str | None = None
+    restaurant_name: str | None = None
+    items: list[SyncItem] = Field(default_factory=list)
+
+
+@router.post("/sync")
+async def sync_cart(req: CartSyncRequest):
+    """Make the user's Swiggy cart exactly the browser basket."""
     state = get_session(req.session_id)
-    client = SwiggyReadClient()
+    items = [it for it in req.items if it.quantity > 0]
+    if sum(it.price * it.quantity for it in items) > _CART_CAP:
+        raise HTTPException(status_code=400, detail=f"Cart value cannot exceed ₹{_CART_CAP}.")
+    if items and not state.address_id:
+        raise HTTPException(status_code=400, detail="Pick a delivery address first.")
+    if items and not req.restaurant_id:
+        raise HTTPException(status_code=400, detail="Basket has no restaurant.")
 
-    # 1. Single Restaurant Guard (Architecture Phase 9.5)
-    if state.cart_restaurant_id and state.cart_restaurant_id != req.item.restaurant_id:
-        log.info("cart_flush_restaurant_switch", old=state.cart_restaurant_id, new=req.item.restaurant_id)
-        await client.flush_food_cart()
-        state.cart_has_items = False
-        state.cart_restaurant_id = None
+    lock = _sync_locks.setdefault(req.session_id, asyncio.Lock())
+    async with lock:
+        if req.seq < _last_seq.get(req.session_id, -1):
+            return {"ok": True, "stale": True}
+        _last_seq[req.session_id] = req.seq
 
-    # 2. Budget Guard (Architecture Phase 9.7)
-    # Estimate total based on the requested add. We'd usually read the existing cart total first.
-    # To save an API call, we just block single items over 1000 or track an estimated total locally.
-    # A true implementation would GET the cart first, but let's assume we estimate for now.
-    if req.item.price * req.quantity > 1000:
-        log.warning("cart_budget_exceeded", price=req.item.price)
-        raise HTTPException(status_code=400, detail="Cart value cannot exceed ₹1000 during dev.")
+        client = SwiggyReadClient()
+        try:
+            if not items:
+                await client.flush_food_cart()
+                live = []
+                to_pay = 0
+            else:
+                res = await client.update_food_cart(
+                    items=[{"menu_item_id": it.id, "quantity": it.quantity} for it in items],
+                    restaurant_id=req.restaurant_id,
+                    address_id=state.address_id,
+                    restaurant_name=req.restaurant_name,
+                )
+                data = res.get("data") or {}
+                live = [i for i in data.get("items") or [] if isinstance(i, dict)]
+                to_pay = (data.get("pricing") or {}).get("to_pay")
+        except (SwiggyApiError, SwiggyUnavailableError) as exc:
+            log.warning("cart_sync_failed", error=str(exc))
+            raise HTTPException(status_code=502, detail=str(exc))
 
-    # 3. Add item
-    try:
-        res = await client.update_food_cart(
-            items=[{"itemId": req.item.id, "quantity": req.quantity}],
-            restaurant_id=req.item.restaurant_id,
-            address_id=state.address_id
-        )
-        
-        # Check budget again after API. Swiggy `update_food_cart` sometimes
-        # returns a list (content envelope) rather than a dict — in that case
-        # we skip the post-hoc total check and rely on the pre-call guard above.
-        total = 0
-        if isinstance(res, dict):
-            cart = res.get("cart") if isinstance(res.get("cart"), dict) else {}
-            total = cart.get("total", 0) or res.get("total", 0) or 0
-        if total > 1000:
-            log.warning("cart_budget_exceeded_after_api", total=total)
-            await client.update_food_cart(
-                items=[{"itemId": req.item.id, "quantity": 0}], # revert
-                restaurant_id=req.item.restaurant_id,
-                address_id=state.address_id
-            )
-            raise HTTPException(status_code=400, detail="Adding this item exceeds the ₹1000 limit.")
-            
-        state.cart_has_items = True
-        state.cart_restaurant_id = req.item.restaurant_id
-        return res
-        
-    except Exception as e:
-        log.error("cart_add_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/remove")
-async def remove_from_cart(req: CartRequest):
-    state = get_session(req.session_id)
-    client = SwiggyReadClient()
-    
-    try:
-        # Quantity 0 removes the item
-        res = await client.update_food_cart(
-            items=[{"itemId": req.item.id, "quantity": 0}],
-            restaurant_id=req.item.restaurant_id,
-            address_id=state.address_id
-        )
-        
-        cart_total = 0
-        if isinstance(res, dict):
-            cart = res.get("cart") if isinstance(res.get("cart"), dict) else {}
-            cart_total = cart.get("total", 0) or res.get("total", 0) or 0
-        if cart_total <= 0:
-            state.cart_has_items = False
-            state.cart_restaurant_id = None
-            
-        return res
-        
-    except Exception as e:
-        log.error("cart_remove_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        kept = {str(i.get("menu_item_id")): int(i.get("quantity") or 0) for i in live}
+        missing = [it.id for it in items if kept.get(it.id) != it.quantity]
+        state.cart_has_items = bool(live)
+        state.cart_restaurant_id = req.restaurant_id if live else None
+        save_session(state)
+        if missing:
+            log.warning("cart_sync_items_dropped", missing=missing)
+        return {
+            "ok": not missing,
+            "items": [{"id": k, "quantity": v} for k, v in kept.items()],
+            "missing": missing,
+            "to_pay": to_pay,
+        }

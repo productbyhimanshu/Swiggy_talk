@@ -139,7 +139,7 @@ async def test_fetch_coupons_filters_non_cod():
         ]
 
     client.set_tool_override("fetch_food_coupons", coupon_tool)
-    result = await client.fetch_food_coupons()
+    result = await client.fetch_food_coupons("r1", "addr1")
     codes = [c["code"] for c in result]
     assert "COD10" in codes
     assert "ANYCOUPON" in codes
@@ -158,7 +158,7 @@ async def test_fetch_coupons_all_cod_compatible():
         ]
 
     client.set_tool_override("fetch_food_coupons", all_cod)
-    result = await client.fetch_food_coupons()
+    result = await client.fetch_food_coupons("r1", "addr1")
     # "A" has "card" but also "cod" → compatible
     codes = [c["code"] for c in result]
     assert "A" in codes
@@ -217,11 +217,16 @@ async def test_search_restaurants_normalises_dict():
     client = _client()
 
     async def wrapped(args):
-        return {"restaurants": [{"name": "Biryani House"}]}
+        # Real search_restaurants structuredContent shape
+        return {"restaurants": [{"id": "9", "name": "Biryani House (Ad)", "avgRating": 4.3,
+                                 "deliveryTimeMinutes": 25, "costForTwo": "₹300 for two",
+                                 "availabilityStatus": "OPEN", "veg": True}],
+                "hasMore": False}
 
     client.set_tool_override("search_restaurants", wrapped)
     result = await client.search_restaurants("biryani", "addr1")
-    assert result[0]["name"] == "Biryani House"
+    assert result[0]["name"] == "Biryani House" and result[0]["id"] == "9"
+    assert result[0]["pureVeg"] is True and result[0]["rating"] == 4.3
 
 
 @pytest.mark.asyncio

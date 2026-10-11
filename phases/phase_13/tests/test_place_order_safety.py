@@ -162,6 +162,37 @@ def test_real_swiggy_cart_shape_parses_full_bill():
     assert s["restaurant"]["name"] == "Chhabra's Pure Veg" and s["restaurant"]["eta"] == "10-15"
 
 
+def test_quantity_two_uses_unit_price_not_line_total():
+    # Live shape: final_price/total are the line total for qty 2.
+    raw = {"data": {"items": [{"menu_item_id": 177379645, "name": "Chicken Biryani Bowl", "quantity": 2,
+                               "subtotal": 658, "total": 658, "final_price": 658}],
+                    "pricing": {"item_total": 658, "delivery_charge": 0, "taxes_and_charges": 50.88,
+                                "to_pay": 909}}}
+    s = po._extract_cart_summary(raw)
+    assert s["items"][0]["price"] == 329 and s["items"][0]["quantity"] == 2
+    assert s["subtotal"] == 658 and s["total"] == 909
+
+
+@pytest.mark.asyncio
+async def test_status_reads_swiggy_orders_list(monkeypatch):
+    class _R:
+        async def track_food_order(self, order_id):
+            return {"orders": [{"orderId": "123", "orderStatus": "Picked up"}],
+                    "statusMessage": "Tracking information retrieved successfully"}
+
+    monkeypatch.setattr(po, "SwiggyReadClient", lambda: _R())
+    out = await po.order_status("123")
+    assert out["status"] == "Picked up"
+
+    class _Empty:
+        async def track_food_order(self, order_id):
+            return {"orders": [], "statusMessage": "No tracking information found"}
+
+    monkeypatch.setattr(po, "SwiggyReadClient", lambda: _Empty())
+    out = await po.order_status("123")
+    assert out["status"] == "" and out["message"].startswith("No tracking")
+
+
 @pytest.mark.asyncio
 async def test_review_disables_placing_when_swiggy_cart_unconfirmed(monkeypatch):
     read = FakeRead(None)

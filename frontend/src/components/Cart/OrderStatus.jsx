@@ -100,7 +100,7 @@ const STAGES = [
 ];
 
 function readStage(status) {
-  const raw = (status?.raw?.status || status?.raw?.orderStatus || "").toString().toLowerCase();
+  const raw = (status?.status || status?.raw?.status || status?.raw?.orderStatus || "").toString().toLowerCase();
   if (raw.includes("deliver")) return 3;
   if (raw.includes("pick"))    return 2;
   if (raw.includes("prepar") || raw.includes("cook")) return 1;

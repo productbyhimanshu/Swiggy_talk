@@ -3,6 +3,7 @@
 import asyncio
 import re
 from collections import Counter
+from difflib import SequenceMatcher
 from typing import Any
 
 from phases.phase_00.services.swiggy_auth import ReauthRequired, SwiggyAuthError
@@ -455,6 +456,17 @@ def _keyword_match(name_lc: str, terms: list[str]) -> tuple[int, str | None]:
     return best, best_term
 
 
+def _resembles(name_lc: str, term: str, threshold: float = 0.8) -> bool:
+    """True if any significant word of `term` is a near-spelling of a word in the name."""
+    name_words = re.findall(r"[a-z]+", name_lc)
+    for w in term.lower().split():
+        if w in _GENERIC_DISH_WORDS or len(w) < 3:
+            continue
+        if any(SequenceMatcher(None, w, nw).ratio() >= threshold for nw in name_words):
+            return True
+    return False
+
+
 async def _search_dishes(
     swiggy_client: SwiggyReadClient,
     terms: list[str],
@@ -470,6 +482,9 @@ async def _search_dishes(
     veg_only = intent.veg_nonveg == "veg"
 
     def _passes(d: dict) -> bool:
+        # Swiggy's vegFilter doesn't actually filter, so check diet here too.
+        if intent.veg_nonveg == "veg" and not d.get("veg"):
+            return False
         if intent.veg_nonveg == "nonveg" and d.get("veg") is True:
             return False
         return not (intent.budget_max and d.get("price", 0) > intent.budget_max)
@@ -528,9 +543,15 @@ def _rank_dishes(
         if rest is not None and rest.get("availabilityStatus", "OPEN") != "OPEN":
             continue
 
-        # search_menu matched on Swiggy's side, so a spelling variant
-        # ("Daal Makhni") still counts as a loose match.
-        level = max(_keyword_match(dish.get("name", "").lower(), [term])[0], 1)
+        # Swiggy's search_menu returns *something* even for nonsense ("xqzzvplk"
+        # → milks), so a hit must resemble the term. Spelling variants
+        # ("Daal Makhni" for "dal makhani") still pass as loose matches.
+        name_lc = dish.get("name", "").lower()
+        level = _keyword_match(name_lc, [term])[0]
+        if level == 0 and _resembles(name_lc, term):
+            level = 1
+        if level == 0:
+            continue
         rest_rating = rest.get("rating") if rest else None
         candidates.append({
             **dish,

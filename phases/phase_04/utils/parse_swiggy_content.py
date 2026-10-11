@@ -257,9 +257,19 @@ def _restaurant_from_json(d: dict) -> dict | None:
         "imageUrl": d.get("imageUrl"),
         "areaName": d.get("areaName"),
         "distanceKm": d.get("distanceKm"),
+        "totalRatings": d.get("totalRatings"),
         "placeholder": _cuisine_emoji(cuisines),
-        "veg": None,
+        # Swiggy marks pure-veg restaurants with veg=true (absent otherwise);
+        # the diet gate reads pureVeg.
+        "pureVeg": d.get("veg") is True,
+        "veg": True if d.get("veg") is True else None,
     }
+
+
+def parse_restaurants_structured(sc: dict) -> list[dict]:
+    """search_restaurants structuredContent → restaurant dicts."""
+    out = (_restaurant_from_json(d) for d in (sc or {}).get("restaurants") or [] if isinstance(d, dict))
+    return [r for r in out if r]
 
 
 def _parse_restaurants_json(text: str) -> list[dict] | None:
@@ -341,6 +351,66 @@ def parse_restaurants(content: list[dict]) -> list[dict]:
 
 
 # ── Menu item parsing (get_restaurant_menu) ──────────────────────────────────
+
+def parse_menu_structured(sc: dict) -> dict:
+    """get_restaurant_menu structuredContent → same shape as parse_menu.
+
+    Swiggy: {restaurant: {id, name, isOpen, slaString, avgRating, …},
+             categories: [{title, items: [{id, name, price, inStock, isVeg,
+             isBestseller, rating, hasVariants, hasAddons, description,
+             imageUrl}]}], page, pageSize, totalCategories, hasMore}
+    Out-of-stock items are dropped. Non-veg items carry no isVeg key.
+    """
+    rest = (sc or {}).get("restaurant") or {}
+    rest_id = str(rest.get("id") or "")
+    name = _AD_SUFFIX_RE.sub("", str(rest.get("name") or "")).strip()
+    items: list[dict] = []
+    seen: set[str] = set()
+    for cat in (sc or {}).get("categories") or []:
+        title = str(cat.get("title") or "")
+        for it in cat.get("items") or []:
+            item_id = str(it.get("id") or "")
+            if not item_id or item_id in seen or not it.get("inStock", 1):
+                continue
+            seen.add(item_id)  # same dish is often listed under "Recommended" too
+            try:
+                price = int(float(it.get("price") or 0))
+            except (TypeError, ValueError):
+                continue
+            try:
+                dish_rating = float(it["rating"]) if it.get("rating") not in (None, "") else None
+            except (TypeError, ValueError):
+                dish_rating = None
+            bestseller = bool(it.get("isBestseller"))
+            items.append({
+                "id":           item_id,
+                "itemId":       item_id,
+                "name":         str(it.get("name") or "").strip(),
+                "restaurant":   name,
+                "restaurantId": rest_id,
+                "price":        price,
+                "veg":          it.get("isVeg") is True,
+                "category":     title,
+                "imageUrl":     it.get("imageUrl"),
+                "bestseller":   bestseller,
+                "description":  it.get("description"),
+                "hasVariants":  bool(it.get("hasVariants")),
+                "cuisines":     title or name,
+                "rating":       None,
+                "dishRating":   dish_rating,
+                "placeholder":  "⭐" if bestseller else _cuisine_emoji(title or name),
+            })
+    return {
+        "restaurantId": rest_id,
+        "name":         name,
+        "thumbnail":    rest.get("imageUrl"),
+        "isOpen":       rest.get("isOpen", True),
+        "eta":          rest.get("deliveryTime"),
+        "items":        items,
+        "page":         sc.get("page") if sc else None,
+        "hasMore":      bool((sc or {}).get("hasMore")),
+    }
+
 
 def parse_menu(content: list[dict]) -> dict:
     """

@@ -113,7 +113,10 @@ def _extract_cart_summary(raw: Any) -> dict[str, Any]:
         if not isinstance(it, dict):
             continue
         qty = int(_num(_first(it, "quantity", "qty", default=1)) or 1)
-        price = _num(_first(it, "price", "finalPrice", "final_price", "unitPrice", default=0))
+        # Swiggy's final_price / total are LINE totals (₹658 for 2 × ₹329).
+        unit = _num(_first(it, "price", "unitPrice", "unit_price", default=0))
+        line_total = _num(_first(it, "final_price", "finalPrice", "total", "subtotal", default=0))
+        price = unit or (round(line_total / qty, 2) if line_total else 0.0)
         veg = _first(it, "isVeg", "is_veg", "veg")
         if isinstance(veg, str):
             veg = veg.strip().lower() in ("1", "true", "veg")
@@ -440,4 +443,13 @@ async def order_status(order_id: str) -> dict[str, Any]:
     except Exception as exc:
         log.warning("order_status_failed", order_id=order_id, error=str(exc))
         raise HTTPException(502, "Couldn't fetch order status.")
-    return {"order_id": order_id, "raw": raw}
+    # Swiggy: {orders: [...], statusMessage}. Pick this order (or the only one).
+    orders = [o for o in (raw.get("orders") or []) if isinstance(o, dict)]
+    match = next((o for o in orders if str(o.get("orderId")) == str(order_id)),
+                 orders[0] if len(orders) == 1 else None)
+    status = ""
+    if match:
+        status = str(_first(match, "orderStatus", "status", "orderDeliveryStatus",
+                            "deliveryStatus", default=""))
+    return {"order_id": order_id, "status": status,
+            "message": raw.get("statusMessage"), "raw": raw}

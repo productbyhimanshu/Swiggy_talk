@@ -20,7 +20,7 @@ from phases.phase_02.orchestrator import Route, classify
 from phases.phase_04.services.swiggy_read import SwiggyReadClient
 from phases.phase_06.agents.persona import format_recommendations
 from phases.phase_07.session import get_session, clear_session
-from phases.phase_09.router import CartRequest, CartItem, add_to_cart
+from phases.phase_09.router import CartSyncRequest, SyncItem, sync_cart
 from phases.phase_10.utils.fallbacks import fallback_route, swiggy_down_bubbles
 from phases.phase_00.services.order_guard import OrderDisabledError
 
@@ -71,24 +71,23 @@ def test_session_timeout_clears_cached_data():
 @pytest.mark.asyncio
 @patch("phases.phase_09.router.SwiggyReadClient.update_food_cart")
 async def test_concurrent_cart_add_consistent_state(mock_update):
-    """12.E3 — two concurrent adds to different items → state remains consistent."""
+    """12.E3 — two concurrent basket syncs → state remains consistent."""
     clear_session("concurrent_test")
     session = get_session("concurrent_test")
     session.address_id = "addr_1"
-    mock_update.return_value = {"cart": {"total": 500}}
+    mock_update.return_value = {"statusCode": 0, "data": {"items": [
+        {"menu_item_id": "item_a", "quantity": 1}, {"menu_item_id": "item_b", "quantity": 1}]}}
 
-    req1 = CartRequest(
-        session_id="concurrent_test",
-        item=CartItem(id="item_a", name="Pizza", price=250.0, restaurant_id="r1"),
-        quantity=1,
+    req1 = CartSyncRequest(
+        session_id="concurrent_test", seq=1, restaurant_id="r1",
+        items=[SyncItem(id="item_a", quantity=1, price=250.0)],
     )
-    req2 = CartRequest(
-        session_id="concurrent_test",
-        item=CartItem(id="item_b", name="Pasta", price=200.0, restaurant_id="r1"),
-        quantity=1,
+    req2 = CartSyncRequest(
+        session_id="concurrent_test", seq=2, restaurant_id="r1",
+        items=[SyncItem(id="item_a", quantity=1, price=250.0), SyncItem(id="item_b", quantity=1, price=200.0)],
     )
 
-    await asyncio.gather(add_to_cart(req1), add_to_cart(req2))
+    await asyncio.gather(sync_cart(req1), sync_cart(req2))
 
     # Both items are from the same restaurant — state should be consistent
     assert session.cart_has_items is True
