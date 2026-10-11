@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from phases.phase_00.clock import local_now
 from phases.phase_00.services.identity import current_uid_var
 from phases.phase_00.services.order_guard import OrderDisabledError, assert_orders_enabled
 from phases.phase_04.utils.parse_eta import parse_eta
@@ -86,7 +87,7 @@ def calculate_order_time(
         warn_far_ahead (bool):  True if delivery_target is >4h from now.
         minutes_until_fire (float): Seconds from now until fire_at.
     """
-    now = now or datetime.now()
+    now = now or local_now()
     eta_minutes = parse_eta(eta_str)
     lead_time = timedelta(minutes=eta_minutes + buffer_minutes)
     fire_at = delivery_target - lead_time
@@ -139,7 +140,7 @@ def pre_order_check(
     current_eta = parse_eta(current_eta_str)
     # If ETA has spiked beyond delivery_target window, cancel
     cushion = timedelta(minutes=current_eta + ORDER_BUFFER_MINUTES)
-    would_arrive_at = datetime.now() + cushion
+    would_arrive_at = local_now() + cushion
     if would_arrive_at > job.delivery_target + timedelta(minutes=10):
         log.warning(
             "pre_order_check: ETA spike job=%s current_eta=%d",

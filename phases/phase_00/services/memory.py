@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from phases.phase_00.clock import local_from_timestamp, local_now
 from phases.phase_00.services.identity import current_uid_var
 
 log = logging.getLogger(__name__)
@@ -232,7 +233,7 @@ def get_user_facts(max_facts: int = 5, uid: str | None = None) -> list[str]:
 
         last = recent[0]
         if last["restaurant_name"]:
-            ago = datetime.fromtimestamp(last["ts"])
+            ago = local_from_timestamp(last["ts"])
             facts.append(
                 f"last order: {last['restaurant_name']} on "
                 f"{ago.strftime('%a %d %b')}"
@@ -245,11 +246,11 @@ def suggest_usual(now: datetime | None = None, uid: str | None = None) -> dict |
     uid = uid or _current_uid()
     if not uid:
         return None
-    now = now or datetime.now()
+    now = now or local_now()
     hour = now.hour
 
     def slot(ts: float) -> int:
-        return datetime.fromtimestamp(ts).hour
+        return local_from_timestamp(ts).hour
 
     matching = [o for o in recent_orders(limit=50, uid=uid) if abs(slot(o["ts"]) - hour) <= 1]
     if not matching:

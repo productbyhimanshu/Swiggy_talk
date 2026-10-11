@@ -16,6 +16,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
+from phases.phase_00.clock import local_now
 from phases.phase_01.models.intent import UserIntent
 from phases.phase_01.models.state import ConversationState
 from phases.phase_11.services.scheduler import calculate_order_time, create_job
@@ -24,8 +25,8 @@ _CONFIRM_RE = re.compile(r"\b(confirm|lock|yes|yep|do it|go ahead)\b", re.IGNORE
 
 
 def _parse_target_time(timing: str, now: datetime | None = None) -> datetime | None:
-    """'13:00' → next occurrence of 13:00 (today, or tomorrow if already past)."""
-    now = now or datetime.now()
+    """'13:00' → next occurrence of 13:00 India time (today, or tomorrow if already past)."""
+    now = now or local_now()
     m = re.match(r"^(\d{1,2}):(\d{2})$", timing.strip())
     if not m:
         return None

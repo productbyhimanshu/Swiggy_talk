@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from phases.phase_00.clock import local_now
 from phases.phase_00.services import memory as user_memory
 
 
@@ -41,7 +42,7 @@ def build_opener(now: datetime | None = None) -> dict:
 
     Never raises — memory failures fall back to the time-aware greeting.
     """
-    now = now or datetime.now()
+    now = now or local_now()
 
     try:
         usual = user_memory.suggest_usual(now=now)

@@ -6,6 +6,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
+from phases.phase_00.clock import local_now
 from phases.phase_00.services.swiggy_auth import ReauthRequired, SwiggyAuthError
 from phases.phase_01.models.intent import UserIntent
 from phases.phase_01.models.state import ConversationState
@@ -163,10 +164,9 @@ async def route_message(
                 user_facts = user_memory.get_user_facts(max_facts=5)
             except Exception:
                 user_facts = []
-            from datetime import datetime as _dt
             try:
                 expansion = await expand_intent(
-                    intent, user_facts, _dt.now().hour, gemini_client,
+                    intent, user_facts, local_now().hour, gemini_client,
                 )
                 state.search_relaxation = "expanded"
                 # Use terms as-is — veg preference is applied post-search via
