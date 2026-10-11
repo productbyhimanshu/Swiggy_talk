@@ -21,7 +21,12 @@ from phases.phase_00.config import Settings, get_settings
 from phases.phase_00.logging_setup import get_logger
 from phases.phase_00.services.swiggy_api import SwiggyApiClient, SwiggyApiError
 from phases.phase_00.services.swiggy_auth import ReauthRequired, SwiggyAuthError, SwiggyAuthService
-from phases.phase_04.utils.parse_swiggy_content import parse_addresses, parse_menu, parse_restaurants
+from phases.phase_04.utils.parse_swiggy_content import (
+    parse_addresses,
+    parse_addresses_structured,
+    parse_menu,
+    parse_restaurants,
+)
 
 log = get_logger(__name__)
 
@@ -87,14 +92,14 @@ class SwiggyReadClient:
             [{addressId, label, address, chip}, ...]
         where chip is the quick-reply string shown to the user.
         """
-        result = await self._call("get_addresses", {})
-        # Swiggy returns MCP content blocks — parse text blob into structured dicts
+        result = await self._call("get_addresses", {}, structured=True)
+        if isinstance(result, dict) and isinstance(result.get("addresses"), list):
+            return parse_addresses_structured(result)
+        # Fallback: older text-only responses
         if isinstance(result, list):
             if result and isinstance(result[0], dict) and result[0].get("type") == "text":
                 return parse_addresses(result)
-            return result  # already structured (future-proof)
-        if isinstance(result, dict):
-            return result.get("addresses", [result])
+            return result
         return []
 
     async def search_restaurants(

@@ -202,11 +202,14 @@ async def test_get_addresses_normalises_dict_wrapper():
     client = _client()
 
     async def dict_response(args):
-        return {"addresses": [{"addressId": "a1"}]}
+        # Real get_addresses structuredContent shape
+        return {"addresses": [{"id": "a1", "addressCategory": "Home",
+                               "addressLine": "Name: 6, Some Road"}]}
 
     client.set_tool_override("get_addresses", dict_response)
     result = await client.get_addresses()
     assert len(result) == 1
+    assert result[0]["addressId"] == "a1" and result[0]["address"] == "6, Some Road"
 
 
 @pytest.mark.asyncio

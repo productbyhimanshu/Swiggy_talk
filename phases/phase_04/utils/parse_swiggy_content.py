@@ -77,12 +77,12 @@ _RESTAURANT_RE = re.compile(
 #   "2. [home] Himanshu Mahawar: 6, Unnamed Road, Amer, ... (ID: 92680741)"
 
 _ADDR_RE = re.compile(
-    r"\d+\.\s+"           # "1. "
-    r"\[([^\]]+)\]"        # [Label]  — e.g. "Other", "home", "Hotel"
-    r"\s+[^:]+:\s*"        # " Person Name: "
-    r"([^\n(]+?)"          # full address (stops before "(ID: ...")
-    r"\s*\(ID:\s*(\w+)\)", # (ID: 12345)
-    re.UNICODE,
+    r"^\s*\d+\.\s+"         # "1. "
+    r"\[([^\]]+)\]"         # [Label]  — e.g. "Other", "home", "Hotel"
+    r"\s+[^:\n]+:\s*"       # " Person Name: "
+    r"(.+?)"                # full address — may itself contain "(...)"
+    r"\s*\(ID:\s*([\w-]+)\)\s*$",  # (ID: 12345) at end of line
+    re.UNICODE | re.MULTILINE,
 )
 
 
@@ -153,6 +153,33 @@ def parse_addresses(content: list[dict]) -> list[dict]:
                 "address":   address.strip(),
             })
 
+    return _with_chips(raw)
+
+
+def parse_addresses_structured(sc: dict) -> list[dict]:
+    """Same output as parse_addresses, from get_addresses' structuredContent.
+
+    Swiggy fields: id, addressLine ("Name: full address"), addressTag (user's
+    own label, e.g. "Home3"; may be empty), addressCategory ("Home"/"Other").
+    """
+    raw: list[dict] = []
+    for a in (sc or {}).get("addresses") or []:
+        if not isinstance(a, dict) or not a.get("id"):
+            continue
+        line = str(a.get("addressLine") or "").strip()
+        name, sep, rest = line.partition(": ")
+        address = rest if sep and len(name) <= 60 else line
+        label = str(a.get("addressTag") or a.get("addressCategory") or "Other").strip()
+        raw.append({
+            "addressId": str(a["id"]).strip(),
+            "label":     label[:1].upper() + label[1:],  # "home" → "Home", keeps "Home3"
+            "address":   address,
+        })
+    return _with_chips(raw)
+
+
+def _with_chips(raw: list[dict]) -> list[dict]:
+    """Attach the quick-reply chip text, disambiguating duplicate labels."""
     if not raw:
         return raw
 
