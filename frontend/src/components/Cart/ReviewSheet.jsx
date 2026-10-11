@@ -158,8 +158,14 @@ export default function ReviewSheet({ open, onClose, sessionId, onPlaced, cart, 
               </div>
               {summary.taxes > 0 && (
                 <div className="line">
-                  <span>Taxes</span>
+                  <span>Taxes & charges</span>
                   <span>₹{summary.taxes.toFixed(0)}</span>
+                </div>
+              )}
+              {summary.other_charges > 0 && (
+                <div className="line">
+                  <span>Other charges</span>
+                  <span>₹{summary.other_charges.toFixed(0)}</span>
                 </div>
               )}
               <div className="line grand">

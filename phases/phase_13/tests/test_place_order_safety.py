@@ -143,6 +143,25 @@ async def test_double_click_rejected_while_placing(monkeypatch):
         lock.release()
 
 
+def test_real_swiggy_cart_shape_parses_full_bill():
+    # Shape captured from a live get_food_cart (personal details replaced).
+    raw = {"statusCode": 0, "statusMessage": "done", "data": {
+        "cart_id": 1, "result": "success",
+        "restaurant": {"name": "Chhabra's Pure Veg", "deliverySubtitle": "10-15 mins to Someone: Somewhere"},
+        "items": [{"menu_item_id": 168702323, "name": "Dal Makhani With Jeera Rice", "quantity": 1,
+                   "is_veg": "1", "subtotal": 220, "total": 220, "final_price": 220, "in_stock": 1}],
+        "item_count": 1,
+        "pricing": {"item_total": 220, "delivery_charge": 0, "delivery_charge_strikeoff": 31,
+                    "taxes_and_charges": 49.98, "to_pay": 470},
+    }}
+    s = po._extract_cart_summary(raw)
+    assert s["items"] == [{"id": "168702323", "name": "Dal Makhani With Jeera Rice", "price": 220.0,
+                           "quantity": 1, "veg": True, "image": None}]
+    assert s["total"] == 470 and s["subtotal"] == 220 and s["taxes"] == 49.98
+    assert s["other_charges"] == 200.02  # charged but not itemised — must be visible
+    assert s["restaurant"]["name"] == "Chhabra's Pure Veg" and s["restaurant"]["eta"] == "10-15"
+
+
 @pytest.mark.asyncio
 async def test_review_disables_placing_when_swiggy_cart_unconfirmed(monkeypatch):
     read = FakeRead(None)

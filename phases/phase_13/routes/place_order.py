@@ -17,6 +17,7 @@ Order safety (architecture §5, §19):
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -113,40 +114,58 @@ def _extract_cart_summary(raw: Any) -> dict[str, Any]:
             continue
         qty = int(_num(_first(it, "quantity", "qty", default=1)) or 1)
         price = _num(_first(it, "price", "finalPrice", "final_price", "unitPrice", default=0))
+        veg = _first(it, "isVeg", "is_veg", "veg")
+        if isinstance(veg, str):
+            veg = veg.strip().lower() in ("1", "true", "veg")
         items.append({
             "id":       str(_first(it, "menu_item_id", "itemId", "item_id", "id", default="")),
             "name":     _first(it, "name", "item_name", "itemName", default="Item"),
             "price":    price,
             "quantity": qty,
-            "veg":      _first(it, "isVeg", "veg"),
+            "veg":      veg,
             "image":    _first(it, "imageUrl", "image"),
         })
         subtotal += price * qty
 
-    bill = _first(cart, "bill", "billDetails", "bill_details", default={}) or {}
+    # Swiggy's food cart keeps the bill under `pricing`:
+    # {item_total, delivery_charge, taxes_and_charges, to_pay}
+    bill = _first(cart, "pricing", "bill", "billDetails", "bill_details", default={}) or {}
     if not isinstance(bill, dict):
         bill = {}
-    total = _num(_first(bill, "grandTotal", "toPay", "total", default=None)
-                 or _first(cart, "grandTotal", "toPay", "total", default=None)
-                 or subtotal)
+    item_total = _num(_first(bill, "item_total", "itemTotal", default=None) or subtotal)
+    delivery = _num(_first(bill, "delivery_charge", "deliveryFee", "delivery", default=0))
+    taxes = _num(_first(bill, "taxes_and_charges", "taxes", "gst", default=0))
+    discount = _num(_first(bill, "discount", "total_discount", default=0))
+    total = _num(_first(bill, "to_pay", "toPay", "grandTotal", "total", default=None)
+                 or _first(cart, "to_pay", "toPay", "grandTotal", "total", default=None)
+                 or (item_total + delivery + taxes - discount))
+    # Whatever Swiggy charges but doesn't itemise — shown so the user sees
+    # why the total is higher than the visible lines.
+    other = total - (item_total + delivery + taxes - discount)
+
     restaurant = _first(cart, "restaurant", "restaurantDetails", default={}) or {}
     if not isinstance(restaurant, dict):
         restaurant = {}
     status = restaurant.get("availabilityStatus")
+    eta = _first(restaurant, "eta", "deliveryTime") or cart.get("eta")
+    if not eta and isinstance(restaurant.get("deliverySubtitle"), str):
+        m = re.match(r"\s*(\d+(?:\s*-\s*\d+)?)\s*min", restaurant["deliverySubtitle"])
+        eta = m.group(1).replace(" ", "") if m else None
     return {
         "restaurant": {
             "id":   _first(restaurant, "restaurantId", "id") or _first(cart, "restaurantId", "restaurant_id"),
             "name": _first(restaurant, "name") or _first(cart, "restaurantName", "restaurant_name", default="—"),
-            "eta":  _first(restaurant, "eta", "deliveryTime") or cart.get("eta"),
+            "eta":  eta,
             "open": status in (None, "OPEN"),
         },
-        "items":        items,
-        "subtotal":     round(subtotal, 2),
-        "delivery_fee": round(_num(_first(bill, "deliveryFee", "delivery", default=0)), 2),
-        "taxes":        round(_num(_first(bill, "taxes", "gst", default=0)), 2),
-        "discount":     round(_num(_first(bill, "discount", default=0)), 2),
-        "total":        round(total, 2),
-        "currency":     "INR",
+        "items":         items,
+        "subtotal":      round(item_total, 2),
+        "delivery_fee":  round(delivery, 2),
+        "taxes":         round(taxes, 2),
+        "discount":      round(discount, 2),
+        "other_charges": round(other, 2) if other > 0.5 else 0.0,
+        "total":         round(total, 2),
+        "currency":      "INR",
         "payment_methods": ["COD"],
     }
 
