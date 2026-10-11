@@ -42,13 +42,24 @@ current_uid_var: ContextVar[str] = ContextVar("current_uid", default="")
 # ── Signing ──────────────────────────────────────────────────────────────────
 
 
+# Used only when SESSION_SECRET is unset. Random per process, so cookies can't
+# be forged from source code; the cost is that a restart signs everyone out.
+_EPHEMERAL_SECRET = secrets.token_bytes(32)
+_warned_missing_secret = False
+
+
 def _secret_bytes() -> bytes:
+    global _warned_missing_secret
     s = get_settings().session_secret
-    if not s:
-        # Fallback for dev when SESSION_SECRET is unset. Logged once, loud.
-        log.warning("SESSION_SECRET is empty — using a dev fallback. Set it in .env.")
-        s = "dev-fallback-do-not-use-in-prod"
-    return s.encode("utf-8")
+    if s:
+        return s.encode("utf-8")
+    if not _warned_missing_secret:
+        log.warning(
+            "SESSION_SECRET is not set — using a random per-process key; "
+            "everyone is signed out on restart. Set SESSION_SECRET."
+        )
+        _warned_missing_secret = True
+    return _EPHEMERAL_SECRET
 
 
 def _sign(uid: str) -> str:

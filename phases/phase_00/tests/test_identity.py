@@ -69,3 +69,23 @@ def test_two_cookies_two_uids(clean_env):
 
 def test_mint_uid_is_unique(clean_env):
     assert mint_uid() != mint_uid()
+
+
+def test_missing_secret_uses_unguessable_key(clean_env, monkeypatch):
+    import hashlib
+    import hmac as _hmac
+    import base64
+
+    from phases.phase_00.config import get_settings
+
+    monkeypatch.setenv("SESSION_SECRET", "")
+    get_settings.cache_clear()
+
+    signed = _sign("u_victim")
+    assert _verify(signed) == "u_victim"  # still works within this process
+
+    # A cookie forged with any well-known string must not validate.
+    for guess in ("dev-fallback-do-not-use-in-prod", "", "secret"):
+        mac = _hmac.new(guess.encode(), b"u_victim", hashlib.sha256).digest()
+        forged = "u_victim." + base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
+        assert _verify(forged) is None
